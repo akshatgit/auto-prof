@@ -88,11 +88,10 @@ override layer that sits alongside the autonomous loop, not inside it.
     tick (used by `autoprof daemon run --once` and by tests).
 - [x] `autoprof/daemon_cli.py` → `autoprof daemon run [--once] [--interval]
       [--budget] [--lab-dir] [--db-path] [--config-path] [--lock-path]`.
-- [ ] **Not yet built:** general state-machine advancement (task
-      completed → professor callback → nomination, paper/defense review
-      dispatch+tally analogous to lab_review). Lab review's tally/
-      propagate logic (Phase 4.5 below) is the only state-machine
-      advancement that exists so far.
+- [x] State-machine advancement through paper acceptance — see Phase 4.6.
+- [ ] **Still not built:** professor callback (§3.3) on an accepted
+      paper, nomination, defense dispatch+tally. A task reaching
+      `pending_prof_review` is currently where the automated chain stops.
 
 ## Phase 4.5 — Lab Review (added mid-session, not in original DESIGN.md) ✅ done
 
@@ -119,18 +118,84 @@ against a lab until review passes.
     systematically rejected bare problem statements for lacking a proof
     they were never supposed to have yet. The lab-specific rubric
     evaluates well-posedness / novelty / scope / tractability instead.
-- [x] `autoprof/lab_cli.py` → `autoprof lab {list, review-request <id>}`.
+- [x] `autoprof/lab_cli.py` → `autoprof lab {list, review-request <id>,
+      revise <id> [problem]}`.
+- [x] `revise_root_problem` (added Phase 4.6): the missing half of "fail
+      leaves the lab `pending_review` for revision + a fresh round" —
+      nothing actually performed the revision, so a rejected lab was a
+      dead end. Bumps `current_review_round` **before** enqueuing the new
+      reviewer set so the new `reviews` rows validate against it, leaves
+      prior rounds on the record, and refuses to rewrite the root problem
+      of an `active` lab (that would silently invalidate every task
+      already decomposed from the old one).
 - [x] Wired into `daemon_cli.py`'s `special_handlers`.
 - [x] Live-tested against real `codex exec` calls end-to-end (see
       "Live end-to-end verification" below) — including catching and
       fixing the rubric-mismatch bug above via real reviewer output, not
       simulated tests.
 
+## Phase 4.6 — Research Lifecycle Advancement ✅ done
+
+Closes the "biggest remaining gap" the Explicitly-deferred section named:
+the chain now runs unattended from an activated lab all the way to an
+accepted (or rejected) paper.
+
+- [x] `autoprof/jsonio.py` — `extract_json_object`, shared by
+      `create_prof` and `decompose`. Salvages fenced JSON and the
+      "Here is the JSON:\n{...}" shape rather than failing the job.
+- [x] `autoprof/decompose.py` — `professor_decompose` as a special
+      handler. Asks for **structured JSON** (not prose) and creates real
+      `tasks` rows + briefs, seeds one student per task, and enqueues the
+      `student_work` jobs. Validation rejects rather than repairs: a bad
+      `direction` or missing `end_criteria` fails the job for retry,
+      since the schema CHECK-constrains both and guessing them out of
+      free text is a silent-corruption source a multi-year run can't
+      recover from. Capped at `MAX_TASKS_PER_DECOMPOSITION`; idempotent
+      against a lab that already has tasks.
+- [x] `autoprof/paper.py` — `student_work` (work the problem → memory.md
+      → enqueue write-up) and `student_write_paper` (draft the ACM HTML
+      paper from `templates/paper_template.html` → `papers` row →
+      request review). Two job kinds, not one, so a formatting failure in
+      the write-up doesn't discard the research work that preceded it.
+      Respects `students.paused_at` by releasing the lease without
+      burning an attempt.
+- [x] `autoprof/paper_review.py` — same shape as `lab_review`: 3
+      independent reviewers, 2-of-3 `strong_accept`, no partial tallying.
+      Uses `templates/review_rubric.md` (the completed-document rubric).
+      Pass → paper `accepted`, task → `pending_prof_review`. Fail →
+      `rejected`; a fresh round is deliberately NOT auto-requested,
+      because §3.3 gives the professor the revise/re-scope/abandon
+      choice. `resubmit_paper` starts round N+1 when that choice is made.
+- [x] All five lifecycle kinds wired into `daemon_cli.SPECIAL_HANDLERS`;
+      `student_write_paper` added to the registry's generation kinds.
+
+Bugs this phase found and fixed (all pre-existing):
+- `professors.memory_path` was stored repo-root-relative
+  (`lab/<lab_id>/...`) but every consumer joins it onto `lab_dir`, so the
+  daemon wrote professor memory to `lab/lab/<id>/...` and the memory
+  `create-prof` had seeded was never actually updated. All artifact paths
+  are now uniformly lab_dir-relative (`<lab_id>/...`), including
+  `lab_review`'s rationale paths.
+- `build_review_prompt` had to use `str.replace`, not `str.format`: an
+  ACM-style HTML paper is full of CSS braces, every one of which
+  `format()` reads as a replacement field.
+- `--db-path` parsed only *before* the subcommand for `lab`/`student`
+  (group-level flag) but *after* it for `create-prof`/`daemon run` (leaf
+  flag). Now accepted in both positions for all four.
+- `CodexBackend` timeout was 280s — too short for writing or reviewing a
+  full paper. Now 900s, overridable via `AUTOPROF_CODEX_TIMEOUT`, still
+  inside the 1800s job lease.
+
 ## Phase 5 — CLI Surface Completion (partial)
 
 - [x] `autoprof lab list` / `review-request`.
-- [ ] `autoprof status` — full tree view (labs/professors/tasks/students/
-      papers in one place); `lab list` covers only labs so far.
+- [x] `autoprof status` — `autoprof/status_cli.py`, full read-only tree
+      view: labs → professor → lab-review tally → tasks → assigned
+      student (with a PAUSED marker) → papers → per-round paper verdicts,
+      then the job queue broken down by status and kind, and any failed
+      jobs with their first error line. Verdicts render as `++/+/~+/~-/-/--`
+      with the strong_accept count spelled out, since that count is what
+      the 2-of-3 gate actually turns on.
 - [ ] `autoprof approve-lab` / `reject-lab` — for `lab_proposals` (student
       → new professor promotion, DESIGN.md §3.5). Not started; no code
       path creates `lab_proposals` rows yet since defense/graduation
@@ -185,13 +250,14 @@ this and hasn't been rewritten to match — tracked here so it isn't lost:
 
 ## Explicitly deferred
 
-- **State-machine advancement beyond lab review**: professor_decompose's
-  output is written to memory.md but not parsed into new `tasks` rows;
-  student_work's output is written to memory.md but doesn't produce
-  `papers` rows; paper/defense review dispatch+tally (the same pattern
-  lab_review now proves out) isn't built. This is the biggest remaining
-  gap between "the daemon runs and calls real models" and "the full
-  research lifecycle from DESIGN.md §3 actually advances itself."
+- **Professor callback (§3.3) and everything downstream of it**: an
+  accepted paper leaves its task in `pending_prof_review` and stops
+  there. Nothing yet makes the resolve/keep-going/split/abandon decision,
+  so tasks are never `completed`, students are never nominated, and the
+  defense → graduation → `lab_proposals` chain (§3.4/§3.5) has no
+  upstream trigger. This is now the biggest remaining gap.
+  (Decomposition → task rows → student work → paper → review tally is
+  built; see Phase 4.6.)
 - Memory compaction jobs (§6.3).
 - `lab_proposals` / defense / promotion flow (§3.4/§3.5) — nothing
   upstream of it (defenses) exists yet.

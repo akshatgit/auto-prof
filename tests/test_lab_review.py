@@ -190,9 +190,61 @@ class ExecuteLabReviewJobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
             lab_review.execute_lab_review_job(conn, job_ids[0], backend, lab_dir)
-            expected = lab_dir / f"labs/{ids['lab_id']}/reviews/1/1.md"
+            expected = lab_dir / f"{ids['lab_id']}/reviews/1/1.md"
             self.assertTrue(expected.exists())
             self.assertIn("VERDICT: accept", expected.read_text())
+        conn.close()
+
+
+class ReviseRootProblemTests(unittest.TestCase):
+    def test_bumps_round_and_enqueues_a_fresh_reviewer_set(self):
+        conn = fresh_db()
+        ids = _seed_lab(conn)
+        lab_review.request_lab_review(conn, ids["lab_id"])
+
+        job_ids = lab_review.revise_root_problem(conn, ids["lab_id"], "a sharper problem")
+
+        lab = conn.execute("SELECT * FROM labs WHERE id=?", (ids["lab_id"],)).fetchone()
+        self.assertEqual(lab["root_problem"], "a sharper problem")
+        self.assertEqual(lab["current_review_round"], 2)
+        self.assertEqual(len(job_ids), 3)
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='lab_review' AND review_round=2"
+        ).fetchall()
+        self.assertEqual(sorted(r["reviewer_index"] for r in rows), [1, 2, 3])
+        conn.close()
+
+    def test_round_one_jobs_are_left_untouched(self):
+        conn = fresh_db()
+        ids = _seed_lab(conn)
+        first = lab_review.request_lab_review(conn, ids["lab_id"])
+        lab_review.revise_root_problem(conn, ids["lab_id"], "a sharper problem")
+        still_there = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE kind='lab_review' AND review_round=1"
+        ).fetchone()["n"]
+        self.assertEqual(still_there, len(first))
+        conn.close()
+
+    def test_refuses_to_revise_an_active_lab(self):
+        conn = fresh_db()
+        ids = _seed_lab(conn)
+        conn.execute("UPDATE labs SET status='active' WHERE id=?", (ids["lab_id"],))
+        conn.commit()
+        with self.assertRaises(lab_review.LabReviewError):
+            lab_review.revise_root_problem(conn, ids["lab_id"], "new problem")
+        conn.close()
+
+    def test_refuses_an_empty_problem(self):
+        conn = fresh_db()
+        ids = _seed_lab(conn)
+        with self.assertRaises(lab_review.LabReviewError):
+            lab_review.revise_root_problem(conn, ids["lab_id"], "   ")
+        conn.close()
+
+    def test_unknown_lab_raises(self):
+        conn = fresh_db()
+        with self.assertRaises(lab_review.LabReviewError):
+            lab_review.revise_root_problem(conn, 999, "new problem")
         conn.close()
 
 

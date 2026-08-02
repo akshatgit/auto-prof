@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from . import db, student_ctl
+from .lab_cli import common_args
 
 
 def _cmd_list(args) -> int:
@@ -95,30 +96,41 @@ def _cmd_replay(args) -> int:
 def add_subparser(subparsers) -> None:
     p = subparsers.add_parser("student", help="Inspect or manually control a student.")
     p.add_argument("--db-path", type=Path, default=db.DEFAULT_DB_PATH)
+    # See lab_cli.common_args: makes --db-path work on either side of
+    # the subcommand, matching create-prof/daemon run.
+    common = common_args()
     sub = p.add_subparsers(dest="student_command", required=True)
 
-    sp = sub.add_parser("list", help="List all students.")
+    sp = sub.add_parser("list", help="List all students.", parents=[common])
     sp.set_defaults(func=_cmd_list)
 
-    sp = sub.add_parser("show", help="Show one student's full state.")
+    sp = sub.add_parser("show", help="Show one student's full state.", parents=[common])
     sp.add_argument("student_id", type=int)
     sp.set_defaults(func=_cmd_show)
 
-    sp = sub.add_parser("stop", help="Pause a student (idempotent).")
+    sp = sub.add_parser("stop", help="Pause a student (idempotent).", parents=[common])
     sp.add_argument("student_id", type=int)
     sp.set_defaults(func=_cmd_stop)
 
-    sp = sub.add_parser("resume", help="Un-pause a student (idempotent).")
+    sp = sub.add_parser("resume", help="Un-pause a student (idempotent).", parents=[common])
     sp.add_argument("student_id", type=int)
     sp.set_defaults(func=_cmd_resume)
 
-    sp = sub.add_parser("edit", help="Manually override a student's status and/or memory.md.")
+    sp = sub.add_parser(
+        "edit",
+        help="Manually override a student's status and/or memory.md.",
+        parents=[common],
+    )
     sp.add_argument("student_id", type=int)
     sp.add_argument("--status", default=None, help=f"One of {sorted(student_ctl.VALID_STUDENT_STATUSES)}")
     sp.add_argument("--memory-file", default=None, help="Path to a file whose contents replace memory.md")
     sp.set_defaults(func=_cmd_edit)
 
-    sp = sub.add_parser("replay", help="Re-run a past (done/failed) job as a new pending job.")
+    sp = sub.add_parser(
+        "replay",
+        help="Re-run a past (done/failed) job as a new pending job.",
+        parents=[common],
+    )
     sp.add_argument("job_id", type=int)
     sp.set_defaults(func=_cmd_replay)
 

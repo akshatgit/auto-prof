@@ -17,7 +17,13 @@ from .codex import CodexBackend
 from .ollama_cloud import OllamaCloudBackend
 
 REVIEW_KINDS = {"paper_review", "defense_review", "lab_review"}
-GENERATION_KINDS = {"professor_decompose", "student_work", "professor_callback", "memory_compact"}
+GENERATION_KINDS = {
+    "professor_decompose",
+    "student_work",
+    "student_write_paper",
+    "professor_callback",
+    "memory_compact",
+}
 
 DEFAULT_BACKEND_FOR_CATEGORY = {"generation": "ollama_cloud", "review": "codex"}
 

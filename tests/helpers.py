@@ -19,9 +19,10 @@ def fresh_db() -> sqlite3.Connection:
 def seed_lab_with_student(conn: sqlite3.Connection) -> dict:
     """Minimal professor/lab/task/student fixture, returns their ids.
 
-    Paths follow the real lab/<lab_id>/... convention (docs/DESIGN.md §2)
-    so tests exercising path-building logic (e.g. prompt builders) see
-    realistic values rather than bootstrap placeholders.
+    Paths are lab_dir-relative (<lab_id>/...), matching what the
+    real code stores -- see create_prof.persist_professor -- so tests
+    exercising path-building logic see realistic values rather than
+    bootstrap placeholders.
     """
     cur = conn.cursor()
     cur.execute(
@@ -34,7 +35,7 @@ def seed_lab_with_student(conn: sqlite3.Connection) -> dict:
         (professor_id,),
     )
     lab_id = cur.lastrowid
-    professor_memory_path = f"lab/{lab_id}/professors/{professor_id}/memory.md"
+    professor_memory_path = f"{lab_id}/professors/{professor_id}/memory.md"
     cur.execute(
         "UPDATE professors SET lab_id = ?, memory_path = ? WHERE id = ?",
         (lab_id, professor_memory_path, professor_id),
@@ -45,7 +46,7 @@ def seed_lab_with_student(conn: sqlite3.Connection) -> dict:
         (lab_id,),
     )
     task_id = cur.lastrowid
-    student_memory_path = f"lab/{lab_id}/students/1/memory.md"
+    student_memory_path = f"{lab_id}/students/1/memory.md"
     cur.execute(
         "INSERT INTO students (task_id, professor_id, status, memory_path) "
         "VALUES (?, ?, 'working', ?)",

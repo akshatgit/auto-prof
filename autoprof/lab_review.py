@@ -76,6 +76,40 @@ def request_lab_review(conn: sqlite3.Connection, lab_id: int) -> list[int]:
     return job_ids
 
 
+def revise_root_problem(conn: sqlite3.Connection, lab_id: int, root_problem: str) -> list[int]:
+    """Replace a failed lab's root problem and start a fresh review round.
+
+    docs/DESIGN.md §3.2's revise-and-resubmit loop, at the lab level: the
+    round is bumped BEFORE the new reviewer jobs are enqueued so their
+    `reviews` rows validate against `labs.current_review_round`, and the
+    previous round's reviews stay on the record -- review history is
+    append-only, and a later round's reviewers must never see (or be
+    tallied alongside) an earlier round's verdicts.
+
+    Only a lab still in `pending_review` can be revised: rewriting the
+    root problem of an `active` lab would silently invalidate every task
+    already decomposed from the old one.
+    """
+    lab = conn.execute("SELECT * FROM labs WHERE id = ?", (lab_id,)).fetchone()
+    if lab is None:
+        raise LabReviewError(f"no lab with id={lab_id}")
+    if lab["status"] != "pending_review":
+        raise LabReviewError(
+            f"lab {lab_id} is {lab['status']!r}; only a lab still in 'pending_review' "
+            "can have its root problem revised"
+        )
+    if not root_problem.strip():
+        raise LabReviewError("revised root problem is empty")
+
+    conn.execute(
+        "UPDATE labs SET root_problem = ?, current_review_round = current_review_round + 1 "
+        "WHERE id = ?",
+        (root_problem.strip(), lab_id),
+    )
+    conn.commit()
+    return request_lab_review(conn, lab_id)
+
+
 def execute_lab_review_job(
     conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
 ) -> str:
@@ -106,7 +140,9 @@ def execute_lab_review_job(
         )
     verdict = match.group(1)
 
-    relpath = f"labs/{lab['id']}/reviews/{row['review_round']}/{row['reviewer_index']}.md"
+    # lab_dir-relative, matching professors.memory_path / tasks.brief_path
+    # (see create_prof.persist_professor's note on the double-nesting bug).
+    relpath = f"{lab['id']}/reviews/{row['review_round']}/{row['reviewer_index']}.md"
     write_artifact(lab_dir / relpath, result.text)
 
     conn.execute(

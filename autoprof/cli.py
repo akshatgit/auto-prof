@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from . import create_prof, daemon_cli, lab_cli, student_cli, webserver_cli
+from . import create_prof, daemon_cli, lab_cli, status_cli, student_cli, webserver_cli
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -10,6 +10,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_prof.add_subparser(subparsers)
     student_cli.add_subparser(subparsers)
     lab_cli.add_subparser(subparsers)
+    status_cli.add_subparser(subparsers)
     daemon_cli.add_subparser(subparsers)
     webserver_cli.add_subparser(subparsers)
     return parser

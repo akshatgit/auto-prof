@@ -1,0 +1,362 @@
+<!--
+  auto-prof paper template (ACM sigconf style, self-contained HTML).
+
+  Fill in every section. Do not delete a section even if brief — reviewers
+  are instructed to flag missing required sections as an automatic
+  weak_reject or worse (see review_rubric.md).
+  Section 4 MUST explicitly state whether this is a proof or a disproof
+  (or, for open-direction tasks, what kind of result it is) — reviewers
+  check this first.
+
+  Authoring rules for this file:
+  - Replace every {placeholder} and every element marked class="fillme".
+  - Keep the <style> block and the element ids/classes intact: the two-column
+    ACM layout, section numbering, and reference formatting are all driven by
+    CSS counters, not by hand-typed numbers. Never type "3." in front of a
+    section heading — the counter emits it.
+  - The document is a single self-contained file. Do not add external CSS,
+    fonts, scripts, or images; embed any figure as an inline <svg> or a
+    data: URI so the paper stays reviewable as one artifact.
+  - Print/PDF: the page box is US Letter with ACM margins, so
+    "Print to PDF" from any browser produces a submission-shaped document.
+-->
+<meta charset="utf-8">
+<title>{Title}</title>
+<style>
+  /* ---- page box: ACM sigconf geometry (US Letter, 0.75in side margins) ---- */
+  @page {
+    size: letter;
+    margin: 0.75in 0.75in 1in 0.75in;
+  }
+
+  :root {
+    --serif: "Linux Libertine O", "Linux Libertine", Libertinus Serif,
+             "Times New Roman", Times, serif;
+    --sans: "Linux Biolinum O", "Nimbus Sans", Helvetica, Arial, sans-serif;
+    --mono: "Nimbus Mono PS", "Courier New", monospace;
+    --ink: #000;
+    --rule: #000;
+    --muted: #444;
+  }
+
+  html { font-size: 9pt; }
+
+  body {
+    font-family: var(--serif);
+    font-size: 9pt;
+    line-height: 1.18;
+    color: var(--ink);
+    background: #fff;
+    max-width: 7in;
+    margin: 0 auto;
+    padding: 0.5in 0.25in 1in;
+    text-align: justify;
+    hyphens: auto;
+    counter-reset: section figure table thmcount lemcount defncount;
+  }
+
+  /* ---------------- title block (full width, single column) ------------- */
+  header.paper {
+    text-align: center;
+    margin: 0 0 12pt;
+  }
+  header.paper h1 {
+    font-family: var(--sans);
+    font-size: 20pt;
+    font-weight: bold;
+    line-height: 1.1;
+    margin: 0 0 10pt;
+    text-align: center;
+    hyphens: none;
+  }
+  .authors {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0 36pt;
+    margin: 0 0 10pt;
+  }
+  .author { text-align: center; }
+  .author .name { font-size: 10pt; }
+  .author .affil,
+  .author .email { font-size: 9pt; color: var(--muted); }
+
+  .conf-note {
+    font-size: 8pt;
+    color: var(--muted);
+    border-top: 0.5pt solid var(--rule);
+    border-bottom: 0.5pt solid var(--rule);
+    padding: 4pt 0;
+    margin: 0 0 10pt;
+    text-align: center;
+  }
+
+  /* ---------------- two-column body ------------------------------------- */
+  main {
+    column-count: 2;
+    column-gap: 0.33in;
+    column-fill: balance;
+  }
+
+  /* ---------------- section headings, auto-numbered ---------------------- */
+  h2, h3, h4 {
+    font-family: var(--sans);
+    text-align: left;
+    hyphens: none;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  h2 {
+    font-size: 11pt;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    margin: 11pt 0 4pt;
+    counter-increment: section;
+    counter-reset: subsection;
+  }
+  h2::before { content: counter(section) " "; }
+  h3 {
+    font-size: 10pt;
+    margin: 9pt 0 3pt;
+    counter-increment: subsection;
+    counter-reset: subsubsection;
+  }
+  h3::before { content: counter(section) "." counter(subsection) " "; }
+  h4 {
+    font-size: 9pt;
+    font-style: italic;
+    margin: 7pt 0 2pt;
+    counter-increment: subsubsection;
+  }
+  h4::before {
+    content: counter(section) "." counter(subsection) "." counter(subsubsection) " ";
+  }
+  /* unnumbered headings: abstract, CCS, keywords, acknowledgments, references */
+  h2.nonum { counter-increment: none; }
+  h2.nonum::before { content: none; }
+
+  p { margin: 0 0 5pt; text-indent: 0; }
+  p + p { text-indent: 10pt; margin-top: -3pt; }
+
+  /* ---------------- abstract / CCS / keywords --------------------------- */
+  section.abstract { break-inside: avoid; }
+  section.abstract p { text-indent: 0; }
+  .ccs, .keywords { font-size: 8.5pt; margin: 0 0 6pt; }
+  .ccs em { font-style: italic; }
+
+  /* ---------------- ACM reference format block -------------------------- */
+  .acm-ref {
+    font-size: 8pt;
+    color: var(--muted);
+    border-top: 0.5pt solid var(--rule);
+    padding-top: 4pt;
+    margin: 6pt 0 0;
+    text-indent: 0;
+  }
+
+  /* ---------------- result-kind banner (paper §4 requirement) ----------- */
+  .result-kind {
+    font-family: var(--sans);
+    font-weight: bold;
+    border: 0.75pt solid var(--rule);
+    padding: 4pt 6pt;
+    margin: 0 0 6pt;
+    text-align: left;
+    text-indent: 0;
+    break-inside: avoid;
+  }
+
+  /* ---------------- theorem environments -------------------------------- */
+  .thm, .lem, .defn, .cor, .prop, .claim {
+    margin: 6pt 0;
+    text-indent: 0;
+    break-inside: avoid;
+  }
+  .thm, .lem, .cor, .prop, .claim { font-style: italic; }
+  .thm .lbl, .lem .lbl, .defn .lbl, .cor .lbl, .prop .lbl, .claim .lbl {
+    font-style: normal;
+    font-weight: bold;
+    font-family: var(--sans);
+  }
+  .thm { counter-increment: thmcount; }
+  .lem { counter-increment: lemcount; }
+  .defn { counter-increment: defncount; font-style: normal; }
+  .thm .lbl::after { content: " " counter(thmcount) "."; }
+  .lem .lbl::after { content: " " counter(lemcount) "."; }
+  .defn .lbl::after { content: " " counter(defncount) "."; }
+
+  .proof { margin: 4pt 0 6pt; text-indent: 0; }
+  .proof::before { content: "Proof. "; font-style: italic; }
+  .proof::after { content: " \25A1"; }
+
+  /* numbered derivation steps a reviewer can point at */
+  ol.steps { margin: 4pt 0 6pt 14pt; padding: 0; }
+  ol.steps > li { margin: 0 0 3pt; }
+
+  ul, ol { margin: 0 0 5pt 14pt; padding: 0; }
+  li { margin: 0 0 2pt; }
+
+  /* ---------------- code, figures, tables -------------------------------- */
+  pre, code { font-family: var(--mono); font-size: 8pt; }
+  pre {
+    background: #f5f5f5;
+    border: 0.5pt solid #ccc;
+    padding: 4pt 5pt;
+    margin: 5pt 0;
+    overflow-x: auto;
+    white-space: pre;
+    text-align: left;
+    break-inside: avoid;
+  }
+
+  figure {
+    margin: 7pt 0;
+    text-align: center;
+    break-inside: avoid;
+  }
+  figure > svg, figure > img { max-width: 100%; height: auto; }
+  figure > figcaption {
+    font-size: 8pt;
+    text-align: left;
+    margin-top: 3pt;
+    counter-increment: figure;
+  }
+  figure > figcaption::before { content: "Figure " counter(figure) ": "; }
+
+  /* span a full page width for a wide figure/table */
+  figure.wide, table.wide { column-span: all; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 8pt;
+    margin: 7pt 0;
+    break-inside: avoid;
+  }
+  table caption {
+    caption-side: top;
+    font-size: 8pt;
+    text-align: left;
+    margin-bottom: 3pt;
+    counter-increment: table;
+  }
+  table caption::before { content: "Table " counter(table) ": "; }
+  th, td { padding: 2pt 4pt; text-align: left; }
+  thead th { border-top: 0.75pt solid var(--rule); border-bottom: 0.5pt solid var(--rule); }
+  tbody tr:last-child td { border-bottom: 0.75pt solid var(--rule); }
+
+  /* ---------------- references (ACM numeric style) ----------------------- */
+  ol.references {
+    font-size: 8pt;
+    margin: 0 0 0 14pt;
+    padding: 0;
+  }
+  ol.references > li { margin: 0 0 3pt; text-indent: 0; }
+  a { color: inherit; text-decoration: none; border-bottom: 0.4pt dotted #888; }
+
+  /* ---------------- authoring aids (visible until filled in) ------------- */
+  .fillme { color: #7a0000; }
+  @media print { .fillme { color: #000; } }
+</style>
+
+<header class="paper">
+  <h1>{Title}</h1>
+
+  <div class="authors">
+    <div class="author">
+      <div class="name">{student id}</div>
+      <div class="affil">{lab / professor}</div>
+      <div class="email">{contact or student handle}</div>
+    </div>
+    <!-- duplicate .author for each additional author -->
+  </div>
+
+  <div class="conf-note">
+    auto-prof lab report &middot; Task: {task title / id} &middot; {date}
+  </div>
+</header>
+
+<main>
+
+  <section class="abstract">
+    <h2 class="nonum">Abstract</h2>
+    <p class="fillme">{150&ndash;250 words. State the problem, the claim, and
+    the result in plain terms. A reader should know exactly what was shown
+    without reading further.}</p>
+  </section>
+
+  <p class="ccs"><strong>CCS Concepts:</strong>
+    <span class="fillme">&bull; <em>{Top-level concept}</em> &rarr;
+    {Second-level}; {Third-level}.</span></p>
+
+  <p class="keywords"><strong>Keywords:</strong>
+    <span class="fillme">{keyword}, {keyword}, {keyword}</span></p>
+
+  <p class="acm-ref"><strong>ACM Reference Format:</strong><br>
+    <span class="fillme">{student id}. {year}. {Title}.
+    In <em>Proceedings of the auto-prof Lab ({lab name})</em>.
+    {n} pages.</span></p>
+
+  <h2>Introduction</h2>
+  <p class="fillme">{Why this problem/sub-problem matters. What was known
+  before this paper. What gap this paper closes.}</p>
+
+  <h2>Related Work</h2>
+  <p class="fillme">{Prior art this result builds on or must be distinguished
+  from &mdash; including other papers already accepted within this same lab, if
+  relevant. Reviewers check novelty against exactly this section, so be
+  specific and honest about what's already known. Cite with numeric
+  references, e.g. [<a href="#ref-1">1</a>].}</p>
+
+  <h2>Method / Approach</h2>
+  <p class="fillme">{The technique, construction, or argument strategy
+  used.}</p>
+
+  <h2>Result</h2>
+
+  <p class="result-kind">This paper is a:
+    <span class="fillme">{PROOF | DISPROOF | other &mdash; state explicitly}</span></p>
+
+  <p class="fillme">{The full argument. For a proof/disproof, this must be a
+  complete, checkable derivation &mdash; not a sketch. State every assumption.
+  Number lemmas/steps so a reviewer can point at exactly where they disagree,
+  if they do. Use the environments below.}</p>
+
+  <p class="defn"><span class="lbl">Definition</span>
+    <span class="fillme">{notation and assumptions used throughout}</span></p>
+
+  <p class="lem"><span class="lbl">Lemma</span>
+    <span class="fillme">{statement}</span></p>
+
+  <div class="proof">
+    <ol class="steps">
+      <li class="fillme">{step &mdash; each step independently checkable}</li>
+      <li class="fillme">{step}</li>
+    </ol>
+  </div>
+
+  <p class="thm"><span class="lbl">Theorem</span>
+    <span class="fillme">{the main claim, stated formally}</span></p>
+
+  <div class="proof">
+    <ol class="steps">
+      <li class="fillme">{step}</li>
+      <li class="fillme">{step, concluding the claim}</li>
+    </ol>
+  </div>
+
+  <h2>Discussion &amp; Limitations</h2>
+  <p class="fillme">{What this result does <em>not</em> show. Open sub-problems
+  it leaves. Any assumptions that could be challenged.}</p>
+
+  <h2>Conclusion</h2>
+  <p class="fillme">{Restate the result and its significance in 2&ndash;3
+  sentences.}</p>
+
+  <h2 class="nonum">References</h2>
+  <ol class="references">
+    <li id="ref-1" class="fillme">{Author(s). {Year}. <em>{Title}</em>.
+      {Venue / publisher}. {DOI or URL}.}</li>
+  </ol>
+
+</main>

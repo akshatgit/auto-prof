@@ -162,16 +162,28 @@ def run_daemon(
     sleep_fn=time.sleep,
     max_ticks: int | None = None,
     special_handlers: dict | None = None,
+    on_tick=None,
 ) -> None:
     """The tick loop from docs/DESIGN.md §5. `once=True` runs a single
     tick and returns (used for `autoprof daemon run --once` and for
-    tests); otherwise loops until `max_ticks` is reached or forever."""
+    tests); otherwise loops until `max_ticks` is reached or forever.
+
+    `on_tick(tick_number, stats, delay)` is called after each tick with
+    what that tick did and how long the daemon is about to sleep. An
+    unattended daemon is otherwise completely silent for hours at a time,
+    which makes "working through a queue slowly" and "wedged" look
+    identical from outside; `delay` is None on the final tick, when
+    there's no sleep left to report.
+    """
     ticks = 0
     while True:
-        run_tick(conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers)
+        stats = run_tick(conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers)
         ticks += 1
-        if once:
+
+        last = once or (max_ticks is not None and ticks >= max_ticks)
+        delay = None if last else next_wake_delay(conn, default_interval)
+        if on_tick is not None:
+            on_tick(ticks, stats, delay)
+        if last:
             return
-        if max_ticks is not None and ticks >= max_ticks:
-            return
-        sleep_fn(next_wake_delay(conn, default_interval))
+        sleep_fn(delay)

@@ -240,5 +240,47 @@ class RunDaemonOnceTests(unittest.TestCase):
         conn.close()
 
 
+class OnTickCallbackTests(unittest.TestCase):
+    def test_on_tick_receives_stats_and_delay_per_tick(self):
+        conn = fresh_db()
+        seen = []
+        daemon.run_daemon(
+            conn,
+            registry=_NullRegistry(),
+            prompt_builders={},
+            lab_dir=Path("/tmp"),
+            max_ticks=2,
+            sleep_fn=lambda _s: None,
+            on_tick=lambda tick, stats, delay: seen.append((tick, stats, delay)),
+        )
+        self.assertEqual([t for t, _, _ in seen], [1, 2])
+        self.assertEqual(seen[0][1], {"reclaimed": 0, "dispatched": 0})
+        # A sleep is coming after tick 1 but not after the final tick.
+        self.assertIsNotNone(seen[0][2])
+        self.assertIsNone(seen[1][2])
+        conn.close()
+
+    def test_once_reports_a_single_tick_with_no_delay(self):
+        conn = fresh_db()
+        seen = []
+        daemon.run_daemon(
+            conn,
+            registry=_NullRegistry(),
+            prompt_builders={},
+            lab_dir=Path("/tmp"),
+            once=True,
+            sleep_fn=lambda _s: None,
+            on_tick=lambda tick, stats, delay: seen.append((tick, stats, delay)),
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertIsNone(seen[0][2])
+        conn.close()
+
+
+class _NullRegistry:
+    def get_backend(self, kind):
+        raise AssertionError("no jobs should be dispatched in these tests")
+
+
 if __name__ == "__main__":
     unittest.main()

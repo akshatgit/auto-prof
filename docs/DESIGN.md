@@ -173,7 +173,10 @@ student is never left pointing at a closed task:
 
 1. Student works the task's problem.
 2. On reaching a candidate result, drafts a paper from
-   `templates/paper_template.md`.
+   `templates/paper_template.html` — a self-contained ACM sigconf-style
+   HTML document (two-column, CSS-numbered sections/theorems, ACM
+   reference format). The paper artifact is written as `paper.html`;
+   any browser's "Print to PDF" renders it at submission geometry.
 3. Paper enters review (see §4): needs **2 of 3 strong_accept** from
    independent Codex CLI reviewers to pass.
 4. Rejected → `papers.review_round` increments and a fresh set of 3

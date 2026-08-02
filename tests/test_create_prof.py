@@ -2,7 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from autoprof import create_prof, db
 from autoprof.backends.base import Backend, BackendResult
 from autoprof.create_prof import SoulGenerationError, generate_soul, persist_professor
 from tests.helpers import fresh_db
@@ -83,6 +85,70 @@ class PersistProfessorTests(unittest.TestCase):
             self.assertTrue(memory_path.exists())
             self.assertIn("Is testing hard?", memory_path.read_text())
         conn.close()
+
+
+ScriptedBackend = FakeBackend
+
+
+class AutoRequestsLabReviewTests(unittest.TestCase):
+    """create-prof must leave the lab actually reviewable, not just
+    'pending_review' with nothing queued -- see create_prof.run()."""
+
+    def _args(self, tmp, **over):
+        import argparse as _argparse
+
+        base = dict(
+            idea="is testing hard?",
+            yes=True,
+            dry_run=False,
+            no_review=False,
+            db_path=Path(tmp) / "autoprof.db",
+            lab_dir=Path(tmp) / "lab",
+            config_path=Path(tmp) / "missing.toml",
+        )
+        base.update(over)
+        return _argparse.Namespace(**base)
+
+    def _patched_registry(self):
+        class _Reg:
+            def get_backend(self, kind):
+                return ScriptedBackend(
+                    BackendResult(
+                        text=json.dumps(
+                            {"name": "P", "field": "F", "root_problem": "Is testing hard?"}
+                        )
+                    )
+                )
+
+        return _Reg()
+
+    def test_review_jobs_are_enqueued_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(tmp)
+            with mock.patch.object(create_prof, "default_registry", lambda _p: self._patched_registry()):
+                rc = create_prof.run(args)
+            self.assertEqual(rc, 0)
+
+            conn = db.connect(args.db_path)
+            jobs = conn.execute("SELECT * FROM jobs WHERE kind='lab_review'").fetchall()
+            self.assertEqual(len(jobs), 3)
+            self.assertEqual(sorted(j["reviewer_index"] for j in jobs), [1, 2, 3])
+            lab = conn.execute("SELECT * FROM labs").fetchone()
+            self.assertEqual(lab["status"], "pending_review")
+            conn.close()
+
+    def test_no_review_flag_leaves_the_queue_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._args(tmp, no_review=True)
+            with mock.patch.object(create_prof, "default_registry", lambda _p: self._patched_registry()):
+                rc = create_prof.run(args)
+            self.assertEqual(rc, 0)
+
+            conn = db.connect(args.db_path)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='lab_review'").fetchone()[0], 0
+            )
+            conn.close()
 
 
 if __name__ == "__main__":

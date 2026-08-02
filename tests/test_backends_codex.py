@@ -122,5 +122,19 @@ class CodexBackendTests(unittest.TestCase):
         self.assertEqual(CodexBackend().name, "codex")
 
 
+class StdinIsClosedTests(unittest.TestCase):
+    def test_run_passes_devnull_as_stdin(self):
+        """`codex exec` reads extra prompt input from stdin; an inherited
+        stdin makes it block until the timeout expires (see codex.py)."""
+        captured = {}
+
+        def fake_runner(cmd, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        CodexBackend(runner=fake_runner).run("hello")
+        self.assertEqual(captured.get("stdin"), subprocess.DEVNULL)
+
+
 if __name__ == "__main__":
     unittest.main()

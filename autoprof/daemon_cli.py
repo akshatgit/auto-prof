@@ -6,10 +6,24 @@ from pathlib import Path
 from . import db
 from .backends.registry import default_registry
 from .daemon import SingleInstanceLock, run_daemon
+from .decompose import execute_professor_decompose_job
 from .lab_review import execute_lab_review_job
+from .paper import execute_student_work_job, execute_student_write_paper_job
+from .paper_review import execute_paper_review_job
 from .prompt_builders import default_builders
 
-SPECIAL_HANDLERS = {"lab_review": execute_lab_review_job}
+# Every job kind in the research lifecycle needs more than one artifact
+# write to express its outcome (create task rows, insert a papers row,
+# tally a review round), so all of them take the special-handler path;
+# prompt_builders' generic path remains for future single-artifact kinds
+# like memory_compact.
+SPECIAL_HANDLERS = {
+    "lab_review": execute_lab_review_job,
+    "professor_decompose": execute_professor_decompose_job,
+    "student_work": execute_student_work_job,
+    "student_write_paper": execute_student_write_paper_job,
+    "paper_review": execute_paper_review_job,
+}
 
 
 def _cmd_run(args) -> int:
@@ -22,9 +36,23 @@ def _cmd_run(args) -> int:
         print(f"error: another autoprof daemon already holds {args.lock_path}")
         return 1
 
+    def _log_tick(tick: int, stats: dict, delay) -> None:
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status='pending'"
+        ).fetchone()["n"]
+        running = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status='running'"
+        ).fetchone()["n"]
+        sleeping = "" if delay is None else f" sleeping={delay:.0f}s"
+        print(
+            f"[tick {tick}] dispatched={stats['dispatched']} "
+            f"reclaimed={stats['reclaimed']} pending={pending} running={running}{sleeping}",
+            flush=True,
+        )
+
     try:
         mode = "single tick" if args.once else f"loop (interval={args.interval}s)"
-        print(f"autoprof daemon starting ({mode}, budget={args.budget}/tick)")
+        print(f"autoprof daemon starting ({mode}, budget={args.budget}/tick)", flush=True)
         run_daemon(
             conn,
             registry=registry,
@@ -35,6 +63,7 @@ def _cmd_run(args) -> int:
             once=args.once,
             max_ticks=args.max_ticks,
             special_handlers=SPECIAL_HANDLERS,
+            on_tick=_log_tick,
         )
     except KeyboardInterrupt:
         print("\nautoprof daemon stopping (Ctrl-C)")

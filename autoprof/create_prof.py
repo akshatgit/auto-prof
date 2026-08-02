@@ -10,13 +10,13 @@ for years, per docs/DESIGN.md §1/§2.
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
-from . import db
+from . import db, lab_review
 from .backends.base import Backend
 from .backends.registry import default_registry
+from .jsonio import extract_json_object
 
 SOUL_PROMPT_TEMPLATE = """You are helping bootstrap a new research lab in the auto-prof system. \
 A human has given you a raw, possibly half-formed idea for a hard problem. Your job is to \
@@ -66,16 +66,6 @@ class SoulGenerationError(RuntimeError):
     pass
 
 
-def _extract_json_object(text: str) -> dict:
-    """claude -p sometimes wraps JSON in fences or adds stray whitespace
-    despite instructions -- strip fences if present, then parse."""
-    text = text.strip()
-    fence_match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1).strip()
-    return json.loads(text)
-
-
 def generate_soul(idea: str, backend: Backend) -> dict:
     """Call `backend` to turn a raw idea into {name, field, root_problem}.
 
@@ -94,7 +84,7 @@ def generate_soul(idea: str, backend: Backend) -> dict:
         raise SoulGenerationError(f"backend '{backend.name}' error: {result.error}")
 
     try:
-        soul = _extract_json_object(result.text)
+        soul = extract_json_object(result.text)
     except json.JSONDecodeError as e:
         raise SoulGenerationError(
             f"model response was not the expected JSON object: {result.text[:500]}"
@@ -133,7 +123,13 @@ def persist_professor(conn, name: str, field: str, root_problem: str, lab_dir: P
     )
     lab_id = cur.lastrowid
 
-    memory_rel_path = f"lab/{lab_id}/professors/{professor_id}/memory.md"
+    # Relative to lab_dir, NOT to the repo root -- every consumer
+    # (runner.execute_job's `lab_dir / spec.artifact_relpath`, the review
+    # handlers) joins these paths onto lab_dir. Storing the repo-root form
+    # "lab/<lab_id>/..." here made the daemon write professor memory to
+    # lab/lab/<lab_id>/... while create-prof had seeded lab/<lab_id>/...,
+    # so the seeded memory was never actually updated.
+    memory_rel_path = f"{lab_id}/professors/{professor_id}/memory.md"
     cur.execute(
         "UPDATE professors SET lab_id = ?, memory_path = ? WHERE id = ?",
         (lab_id, memory_rel_path, professor_id),
@@ -190,10 +186,29 @@ def run(args: argparse.Namespace) -> int:
     professor_id, lab_id = persist_professor(
         conn, soul["name"], soul["field"], soul["root_problem"], args.lab_dir
     )
-    conn.close()
 
     print(f"Created professor id={professor_id}, lab id={lab_id}.")
-    print(f"Memory seeded at lab/{lab_id}/professors/{professor_id}/memory.md")
+    print(f"Memory seeded at {lab_id}/professors/{professor_id}/memory.md")
+
+    # A lab is created 'pending_review' and the daemon refuses to dispatch
+    # any work against it until review passes -- so without this, a freshly
+    # created lab sits unreviewed indefinitely while the daemon idles next
+    # to it, and the setup step silently produces a dead lab. Requesting
+    # the review here makes `create-prof` a complete bootstrap.
+    if not args.no_review:
+        job_ids = lab_review.request_lab_review(conn, lab_id)
+        print(
+            f"Lab is 'pending_review'; requested round-1 review "
+            f"({lab_review.REVIEWER_COUNT} independent reviewers, "
+            f"{lab_review.STRONG_ACCEPT_THRESHOLD}-of-{lab_review.REVIEWER_COUNT} "
+            f"strong_accept to pass): jobs {job_ids}"
+        )
+        print("Start the daemon to run them: `autoprof daemon run`")
+    else:
+        print("Lab is 'pending_review'; run `autoprof lab review-request "
+              f"{lab_id}` before the daemon will dispatch any work.")
+
+    conn.close()
     return 0
 
 
@@ -209,6 +224,13 @@ def add_subparser(subparsers) -> None:
     )
     p.add_argument(
         "--yes", "-y", action="store_true", help="Skip the confirmation prompt."
+    )
+    p.add_argument(
+        "--no-review",
+        action="store_true",
+        help="Create the lab without requesting its root-problem review "
+             "(it stays 'pending_review' and no work will be dispatched until "
+             "`autoprof lab review-request` is run).",
     )
     p.add_argument(
         "--dry-run",
