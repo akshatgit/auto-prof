@@ -1,0 +1,198 @@
+# Implementation Backlog
+
+Divides `docs/DESIGN.md` into concrete, ordered implementation tasks.
+Built test-first (TDD): a task isn't "done" until it has failing tests
+written before the implementation, then passing after. Status is kept
+current here as work lands — check this before starting new work to
+avoid rebuilding something that already exists.
+
+Backends: this build targets **Codex CLI** (`codex exec`) and **Ollama
+Cloud** (HTTP API) as the pluggable AI backends behind a common
+interface — not hardcoded to a single provider, so either can serve
+generation or review work per job kind, and a third backend can be added
+later without touching callers. This supersedes DESIGN.md §5's original
+"claude -p for generation, codex exec for review" split; §4's review
+pipeline can still use Codex specifically for review isolation, but
+generation is backend-agnostic.
+
+## Phase 0 — Foundations ✅ done
+
+- [x] `docs/schema.sql` — SQLite schema (iteratively codex-reviewed, then
+      extended across every later phase — see "Schema changes since
+      DESIGN.md" below).
+- [x] `docs/DESIGN.md` — architecture.
+- [x] `autoprof/db.py` — connection helper, per-connection `PRAGMA
+      foreign_keys`, schema auto-init.
+- [x] `tests/` — zero-dependency `unittest`-based test infra +
+      `run_tests.sh` (pytest isn't installed; stdlib only).
+
+## Phase 1 — Modular AI Backend Layer ✅ done
+
+- [x] `autoprof/backends/base.py` — `Backend` ABC + `BackendResult`.
+- [x] `autoprof/backends/codex.py` — `CodexBackend`, shells out to `codex
+      exec -o <tmpfile>`, injectable `runner`, parses rate-limit phrasing.
+- [x] `autoprof/backends/ollama_cloud.py` — `OllamaCloudBackend`, HTTP
+      POST via stdlib `urllib.request`, `OLLAMA_API_KEY` env var.
+- [x] `autoprof/backends/registry.py` — config-driven selection
+      (`autoprof.toml` + env-var overrides), precedence: per-kind env >
+      per-kind config > category env > category config > hardcoded
+      fallback (generation→ollama_cloud, review→codex, including
+      `lab_review`).
+- [x] `autoprof/create_prof.py` refactored onto the registry. Verified
+      end-to-end against real `codex exec` calls.
+
+## Phase 2 — Job Execution Core ✅ done
+
+- [x] `autoprof/jobs.py` — `claim_job`/`complete_job`/`fail_job`
+      (lease protocol + retry policy, DESIGN.md §5.1/§5.2),
+      `record_rate_limit` (§5.3), `reclaim_expired_leases`.
+- [x] `autoprof/artifacts.py` — `write_artifact`: temp-file + atomic
+      rename, idempotent per §5.2.
+- [x] `autoprof/runner.py` — `execute_job`: claim → build prompt
+      (pluggable `prompt_builders`) → backend call → branch on
+      rate-limited/error/success → idempotent artifact write → complete.
+- [x] `autoprof/events.py` — `record_job_event` (job-sourced) +
+      `record_human_event` (job_id NULL, actor_type 'human').
+- [x] `autoprof/prompt_builders.py` — real prompt builders for
+      `professor_decompose` and `student_work`, reading actual task/
+      professor/student rows and lab_dir memory files. **Scope note:**
+      these write raw model output back to memory.md but do NOT yet
+      parse it into new task/paper rows — see "Explicitly deferred"
+      below.
+
+## Phase 3 — Student Lifecycle Controls ✅ done
+
+"Any student can be manually edited, stopped, replayed" — a human
+override layer that sits alongside the autonomous loop, not inside it.
+
+- [x] `autoprof/student_ctl.py` + `autoprof/student_cli.py` →
+      `autoprof student {list,show,stop,resume,edit,replay}`. Idempotent
+      stop/resume via `students.paused_at` (orthogonal to `status`);
+      `replay` creates a new job linked via `jobs.replayed_from_job_id`,
+      leaving the original untouched.
+
+## Phase 4 — Daemon Tick Loop ✅ done
+
+- [x] `autoprof/daemon.py`:
+  - `SingleInstanceLock` — OS `flock`, so at most one daemon runs against
+    a given `autoprof.db` (§5.2 — this is what makes the lease
+    protocol's guarantees real, not just theoretical).
+  - `next_wake_delay` — dynamic sleep per §5.3 (min of heartbeat,
+    nearest job backoff, nearest provider window reset).
+  - `dispatch_pending_jobs(..., special_handlers=None)` — generic path
+    via `runner.execute_job` + `prompt_builders`; a job kind present in
+    `special_handlers` takes precedence (used by `lab_review`, which
+    needs to parse a verdict and tally reviewers — more than one
+    PromptSpec artifact write can express).
+  - `run_tick` / `run_daemon` — the full loop, `once=True` for a single
+    tick (used by `autoprof daemon run --once` and by tests).
+- [x] `autoprof/daemon_cli.py` → `autoprof daemon run [--once] [--interval]
+      [--budget] [--lab-dir] [--db-path] [--config-path] [--lock-path]`.
+- [ ] **Not yet built:** general state-machine advancement (task
+      completed → professor callback → nomination, paper/defense review
+      dispatch+tally analogous to lab_review). Lab review's tally/
+      propagate logic (Phase 4.5 below) is the only state-machine
+      advancement that exists so far.
+
+## Phase 4.5 — Lab Review (added mid-session, not in original DESIGN.md) ✅ done
+
+A gate DESIGN.md didn't originally have: a newly created lab's root
+problem is unvetted. `create_prof.py` now creates labs in
+`pending_review`, not `active` — the daemon won't dispatch any work
+against a lab until review passes.
+
+- [x] `autoprof/lab_review.py`:
+  - `request_lab_review(conn, lab_id)` — enqueues 3 independent
+    `lab_review` jobs for the lab's `current_review_round` (idempotency
+    guard: raises if that round was already requested).
+  - `execute_lab_review_job` — parses the reviewer's `VERDICT:` line,
+    writes the rationale file, inserts a `reviews` row. On the round's
+    3rd review landing: tallies 2-of-3 `strong_accept` (same threshold as
+    paper review) — **pass** activates the lab and auto-enqueues its
+    first `professor_decompose` job in the same commit (this is what
+    "review propagates downstream" means concretely); **fail** leaves the
+    lab `pending_review` for revision + a fresh round.
+  - `templates/lab_review_rubric.md` — **not** the same file as
+    `templates/review_rubric.md`. That rubric evaluates a *completed*
+    paper/defense (proof present, Related Work present) and was tried
+    here first; live-tested against real `codex exec` calls, it
+    systematically rejected bare problem statements for lacking a proof
+    they were never supposed to have yet. The lab-specific rubric
+    evaluates well-posedness / novelty / scope / tractability instead.
+- [x] `autoprof/lab_cli.py` → `autoprof lab {list, review-request <id>}`.
+- [x] Wired into `daemon_cli.py`'s `special_handlers`.
+- [x] Live-tested against real `codex exec` calls end-to-end (see
+      "Live end-to-end verification" below) — including catching and
+      fixing the rubric-mismatch bug above via real reviewer output, not
+      simulated tests.
+
+## Phase 5 — CLI Surface Completion (partial)
+
+- [x] `autoprof lab list` / `review-request`.
+- [ ] `autoprof status` — full tree view (labs/professors/tasks/students/
+      papers in one place); `lab list` covers only labs so far.
+- [ ] `autoprof approve-lab` / `reject-lab` — for `lab_proposals` (student
+      → new professor promotion, DESIGN.md §3.5). Not started; no code
+      path creates `lab_proposals` rows yet since defense/graduation
+      isn't built.
+- [ ] `autoprof init` — thin wrapper taking an already-written problem
+      statement, distinct from `create-prof`'s idea-to-soul step. Not
+      started; `create-prof` covers the only bootstrap path that exists.
+
+## Phase 6 — Web UI ✅ done (read-only core)
+
+- [x] `autoprof/webserver.py` — stdlib `http.server` only, zero deps.
+      Routes: `/` (lab list), `/labs/<id>` (tasks + lab reviews),
+      `/students/<id>`, `/professors/<id>` (+ their students). All
+      DB-sourced content passed through `html.escape` — verified via a
+      dedicated XSS-in-root-problem test, not just assumed safe.
+- [x] `autoprof/webserver_cli.py` → `autoprof web run [--host] [--port]
+      [--db-path]`.
+- [ ] Pending-approvals view / approve-reject write path — blocked on
+      Phase 5's `lab_proposals` flow not existing yet.
+
+## Live end-to-end verification (beyond unit tests)
+
+Every phase above was also exercised against a real, throwaway DB with
+real `codex exec` calls (not just the unit test suite), specifically:
+`create-prof` → `lab review-request` → `daemon run --once` → tally →
+(pass: lab activates + `professor_decompose` auto-enqueued, verified
+deterministically in unit tests; fail: stays `pending_review`, verified
+live against real reviewer output on two different problem ideas). This
+live run is what caught two real bugs the unit tests couldn't have caught
+because they mock the backend: (1) `daemon_cli.py`/`create_prof.py` CLI
+wrappers hardcoded `db.LAB_DIR` instead of taking a `--lab-dir` flag,
+silently writing artifacts into the wrong directory when `--db-path` was
+overridden; (2) the lab-review rubric mismatch described in Phase 4.5.
+
+## Schema changes since DESIGN.md (not yet back-filled into the prose)
+
+`docs/schema.sql` is current; `docs/DESIGN.md`'s prose predates all of
+this and hasn't been rewritten to match — tracked here so it isn't lost:
+- `students.paused_at`, `jobs.replayed_from_job_id` (Phase 3).
+- `events.job_id` nullable, `actor_type` gained `'human'`, with
+  `CHECK (job_id IS NOT NULL OR actor_type = 'human')`.
+- `jobs.review_round` / `jobs.reviewer_index` (nullable; only meaningful
+  for review-kind jobs).
+- `reviews.target_type` gained `'lab'`; `trg_reviews_valid_target` gained
+  a lab branch (3 reviewers, round must match `labs.current_review_round`).
+- `labs.status` gained `'pending_review'` (now the *initial* status, not
+  `'active'`); `labs.current_review_round` added.
+- `provider_state.provider` CHECK constraint (`'claude'`/`'codex'`) was
+  **removed entirely** — it predated the /goal pivot to Codex + Ollama
+  Cloud and would have rejected `ollama_cloud`/any future backend name;
+  caught by a real test failure, not by inspection.
+
+## Explicitly deferred
+
+- **State-machine advancement beyond lab review**: professor_decompose's
+  output is written to memory.md but not parsed into new `tasks` rows;
+  student_work's output is written to memory.md but doesn't produce
+  `papers` rows; paper/defense review dispatch+tally (the same pattern
+  lab_review now proves out) isn't built. This is the biggest remaining
+  gap between "the daemon runs and calls real models" and "the full
+  research lifecycle from DESIGN.md §3 actually advances itself."
+- Memory compaction jobs (§6.3).
+- `lab_proposals` / defense / promotion flow (§3.4/§3.5) — nothing
+  upstream of it (defenses) exists yet.
+- Multi-daemon / distributed execution — out of scope per DESIGN.md §9.

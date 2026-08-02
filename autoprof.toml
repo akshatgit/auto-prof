@@ -1,0 +1,13 @@
+# autoprof backend configuration.
+# See autoprof/backends/registry.py for precedence rules (per-kind env var
+# > per-kind override below > category env var > category default below >
+# hardcoded fallback).
+
+[backends.default]
+generation = "ollama_cloud"   # student work, professor decompose/callback, memory compaction
+review = "codex"              # independent paper/defense review (docs/DESIGN.md §4)
+
+# Uncomment to pin a specific job kind to a specific backend, e.g. to run
+# defense review on a different model than paper review:
+# [backends.overrides]
+# defense_review = "codex"
