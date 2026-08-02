@@ -18,8 +18,8 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import jobs
-from .artifacts import write_artifact
+from . import ingest, jobs
+from .artifacts import checkpoint_artifact, write_artifact
 from .backends.base import Backend
 from .events import record_job_event
 from .jsonio import extract_json_object
@@ -38,6 +38,8 @@ Your lab's root problem (your "soul" -- the enduring question your lab exists to
 <root_problem>
 {root_problem}
 </root_problem>
+
+{corpus}
 
 Decompose this root problem into an initial set of {max_tasks} or fewer concrete research \
 tasks that PhD students in your lab will work on. Each task must be small enough that a \
@@ -220,6 +222,7 @@ def execute_professor_decompose_job(
             field=professor["field"],
             root_problem=lab["root_problem"],
             max_tasks=MAX_TASKS_PER_DECOMPOSITION,
+            corpus=ingest.render_corpus(conn, lab['id'], lab_dir),
         )
     )
 
@@ -252,6 +255,7 @@ def execute_professor_decompose_job(
         f"- Task {tid} ({t['direction']}): {t['title']} -- student {sid}"
         for tid, sid, t in created
     )
+    checkpoint_artifact(lab_dir / professor["memory_path"])
     write_artifact(
         lab_dir / professor["memory_path"],
         MEMORY_TEMPLATE.format(

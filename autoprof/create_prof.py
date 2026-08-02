@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import db, lab_review
+from . import db, lab_review, references
 from .backends.base import Backend
 from .backends.registry import default_registry
 from .jsonio import extract_json_object
@@ -190,6 +190,31 @@ def run(args: argparse.Namespace) -> int:
     print(f"Created professor id={professor_id}, lab id={lab_id}.")
     print(f"Memory seeded at {lab_id}/professors/{professor_id}/memory.md")
 
+    # Seed the shared reference bank with prior art for this problem.
+    # Entries land UNVERIFIED and are therefore not citable yet: a model
+    # asked for references produces confident non-existent ones, which is
+    # the failure this bank exists to prevent. A reference_verify job
+    # checks them against the real record and only then are they offered
+    # to students.
+    if not args.no_references:
+        seeded = references.seed_from_root_problem(
+            conn, backend, soul["root_problem"], soul["field"]
+        )
+        if seeded:
+            conn.execute(
+                "INSERT INTO jobs (kind, target_type, target_id, status) "
+                "VALUES ('reference_verify', 'lab', ?, 'pending')",
+                (lab_id,),
+            )
+            conn.commit()
+            print(
+                f"Seeded {len(seeded)} candidate reference(s), unverified. "
+                "A reference_verify job will check them before students may cite them."
+            )
+        else:
+            print("No candidate references seeded (the bank stays empty; students are "
+                  "instructed not to invent citations).")
+
     # A lab is created 'pending_review' and the daemon refuses to dispatch
     # any work against it until review passes -- so without this, a freshly
     # created lab sits unreviewed indefinitely while the daemon idles next
@@ -224,6 +249,11 @@ def add_subparser(subparsers) -> None:
     )
     p.add_argument(
         "--yes", "-y", action="store_true", help="Skip the confirmation prompt."
+    )
+    p.add_argument(
+        "--no-references",
+        action="store_true",
+        help="Skip seeding the shared reference bank with candidate prior art.",
     )
     p.add_argument(
         "--no-review",

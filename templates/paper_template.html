@@ -17,6 +17,31 @@
   - The document is a single self-contained file. Do not add external CSS,
     fonts, scripts, or images; embed any figure as an inline <svg> or a
     data: URI so the paper stays reviewable as one artifact.
+
+  Figures, tables and diagrams — use them where they earn their space:
+  - Reach for a visual whenever the content has shape a reader would
+    otherwise have to reconstruct: a function plotted across a parameter
+    range, exact values tabulated, a case breakdown, the structure of a
+    counterexample, a comparison against prior bounds.
+  - Draw them as inline <svg> (the .wide class spans both columns). These
+    papers are printed to PDF, so there is no hover or interactivity —
+    everything a reader needs must be visible in static ink.
+  - Colours, when a figure needs more than one series, in this fixed order
+    — never cycled, never reassigned by rank:
+        1 #2a78d6 (blue)   2 #eb6834 (orange)
+        3 #1baf7a (aqua)   4 #eda100 (yellow)
+    This set is validated for colour-vision deficiency, but slots 3 and 4
+    sit below 3:1 against white: always give every series a direct label
+    or a legend entry so identity never rests on colour alone. It must
+    also survive greyscale printing — vary line dash or marker shape, not
+    just hue.
+  - One y-axis per plot. Two measures at different scales are two plots,
+    never a second axis.
+  - Keep grid lines and axes recessive; label the data, not every point.
+  - Every figure and table gets a caption saying what to take from it, and
+    is referenced from the prose ("Figure 1 shows ...").
+  - A figure that repeats the sentence next to it is worse than no figure.
+    Omit it.
   - Print/PDF: the page box is US Letter with ACM margins, so
     "Print to PDF" from any browser produces a submission-shaped document.
 -->

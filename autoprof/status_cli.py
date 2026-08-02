@@ -105,6 +105,21 @@ def render_status(conn) -> str:
         error = (row["last_error"] or "").splitlines()
         out.append(f"  FAILED job #{row['id']} ({row['kind']}): {error[0][:120] if error else ''}")
 
+    # Failure memories (§18): what went wrong, grouped, with the rule that
+    # would prevent a recurrence. Surfaced here because a failure nobody
+    # reads teaches nobody anything.
+    memories = conn.execute(
+        "SELECT classification, COUNT(*) AS n, MAX(preventive_rule) AS rule "
+        "FROM failure_memories WHERE resolved = 0 GROUP BY classification ORDER BY n DESC"
+    ).fetchall()
+    if memories:
+        out.append("")
+        out.append("FAILURE MEMORY (unresolved):")
+        for row in memories:
+            out.append(f"  {row['classification']} x{row['n']}")
+            if row["rule"]:
+                out.append(f"    -> {row['rule']}")
+
     return "\n".join(out)
 
 

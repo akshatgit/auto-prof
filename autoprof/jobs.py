@@ -8,6 +8,7 @@ subprocess or the network.
 
 import sqlite3
 
+from . import recovery
 from .events import record_job_event
 
 MAX_ERROR_BACKOFF_SECONDS = 3600
@@ -70,7 +71,13 @@ def fail_job(conn: sqlite3.Connection, job_id: int, lease_id: str, error_message
 
     attempts = row["attempts"] + 1
 
-    if attempts < row["max_attempts"]:
+    # The recovery policy decides whether retrying is even coherent, not
+    # just whether budget remains (§2/§5). A deterministic failure -- bad
+    # credentials, a task that cannot be completed, state that moved on --
+    # is terminal on the first attempt, because five identical retries of
+    # something that cannot succeed cost an hour and change nothing.
+    classification = recovery.classify_failure(error_message)
+    if attempts < row["max_attempts"] and recovery.should_retry(classification, attempts):
         backoff = compute_error_backoff_seconds(attempts)
         conn.execute(
             "UPDATE jobs SET status='pending', attempts=?, last_error=?, "
@@ -96,6 +103,27 @@ def fail_job(conn: sqlite3.Connection, job_id: int, lease_id: str, error_message
         target_id=row["target_id"],
     )
     conn.commit()
+
+    # §18: record what went wrong and what to do differently, so the same
+    # dead remediation is not tried again on the next occurrence.
+    recovery.record_failure_memory(
+        conn,
+        job_id=job_id,
+        classification=classification,
+        symptom=error_message,
+        target_type=row["target_type"],
+        target_id=row["target_id"],
+        failed_remediations=f"retry x{attempts}" if attempts > 1 else "no retry (deterministic)",
+    )
+
+    # §17: a terminal failure must actually leave the job not-running with
+    # its lease released. If it doesn't, say so rather than reporting a
+    # clean failure over a stuck row.
+    ok, failed_checks = recovery.verify_recovery(
+        conn, job_id, ("job_not_running", "lease_released")
+    )
+    if not ok:
+        return "failed_unverified"
     return "failed"
 
 
@@ -163,3 +191,26 @@ def reclaim_expired_leases(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return cur.rowcount
+
+
+def cancel_job(conn: sqlite3.Connection, job_id: int, reason: str) -> bool:
+    """Cancel a pending job by MARKING it, never by deleting the row.
+
+    Deleting a job row frees its rowid, and SQLite reuses freed rowids --
+    so a later INSERT can take the id of a job a daemon still holds in
+    flight, and that daemon's writes then land on an unrelated job. This
+    was observed once in a live run: a job whose recorded kind and recorded
+    event disagreed, because a cancelled-and-recreated row shared an id
+    with work still executing.
+
+    Only a pending job can be cancelled. A running one holds a lease; let
+    it finish or let the lease expire, so its writes always find the row
+    they expect.
+    """
+    cur = conn.execute(
+        "UPDATE jobs SET status='cancelled', completed_at=datetime('now'), last_error=?, "
+        "lease_id=NULL, lease_expires_at=NULL WHERE id=? AND status='pending'",
+        (f"cancelled: {reason}", job_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1

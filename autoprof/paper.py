@@ -18,8 +18,8 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import db, jobs, supervision
-from .artifacts import write_artifact
+from . import db, ingest, jobs, references, supervision, tools
+from .artifacts import checkpoint_artifact, write_artifact
 from .backends.base import Backend
 from .events import record_job_event
 
@@ -28,6 +28,8 @@ _LEADING_HTML_COMMENT_RE = re.compile(r"^\s*<!--.*?-->\s*\n", re.DOTALL)
 _TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
 _H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
+MAX_TOOL_ROUNDS = 3
+
 _FENCE_RE = re.compile(r"^```(?:html)?\s*(.*?)\s*```$", re.DOTALL)
 
 WORK_PROMPT_TEMPLATE = """You are a PhD student in a research lab. You are working on one task.
@@ -52,6 +54,10 @@ Your working memory so far:
 </memory>
 
 {supervision}
+
+{corpus}
+
+{tool_docs}
 
 Now do the actual research work. Think hard and go as far as you can toward an actual \
 result -- not a plan for getting one. Specifically:
@@ -89,6 +95,8 @@ Your complete working memory from doing the research:
 
 {supervision}
 
+{reference_bank}
+
 Write the paper as a single self-contained HTML document, following the template below \
 EXACTLY -- same structure, same CSS, same section order, same class names. The template's \
 ACM two-column layout, section numbering, and theorem numbering are driven by CSS \
@@ -111,6 +119,18 @@ point at exactly the step they disagree with.
 against exactly that section, and overclaiming there is the fastest way to be rejected.
 - Discussion & Limitations must honestly state what the result does NOT show.
 - Do not claim a stronger result than your working memory actually supports.
+- Write it as a person would, not as a filled-in template. Give the reader a narrative: \
+why the problem matters, the idea of the argument in plain terms BEFORE its formal execution, \
+and signposting between sections. Do not write sections that merely restate their own titles.
+- Include figures, tables and diagrams wherever the content has shape a reader would otherwise \
+have to reconstruct: a function plotted across its parameter range, exact values tabulated, a \
+case breakdown, the structure of a counterexample, a comparison against prior bounds. Draw them \
+as inline <svg> using the template's figure/table environments, following the colour and axis \
+rules in the template's authoring comment. The paper is printed to PDF, so everything must be \
+legible in static ink -- no interactivity, and it must survive greyscale.
+- Reference every figure and table from the prose and caption it with what the reader should \
+take from it. A figure that just repeats the sentence beside it, or a two-row table, is worse \
+than nothing -- omit it. Reviewers judge whether each visual earns its space.
 
 Respond with ONLY the HTML document. No markdown code fences, no commentary before or \
 after it.
@@ -137,6 +157,8 @@ This is the paper as submitted:
 {paper}
 </paper>
 
+{reference_bank}
+
 The independent reviewers said the following. They did not see each other's reviews, so where \
 two of them raise the same point independently, treat it as certainly real:
 <reviews>
@@ -158,6 +180,18 @@ If a reviewer found a genuine mathematical error, fix the mathematics and say so
 reviewers agreed the mathematics is correct, keep it as it is.
 - Address scope criticism by stating precisely what is and is not resolved, rather than by \
 claiming more than you proved.
+- Write it as a person would, not as a filled-in template. Give the reader a narrative: \
+why the problem matters, the idea of the argument in plain terms BEFORE its formal execution, \
+and signposting between sections. Do not write sections that merely restate their own titles.
+- Include figures, tables and diagrams wherever the content has shape a reader would otherwise \
+have to reconstruct: a function plotted across its parameter range, exact values tabulated, a \
+case breakdown, the structure of a counterexample, a comparison against prior bounds. Draw them \
+as inline <svg> using the template's figure/table environments, following the colour and axis \
+rules in the template's authoring comment. The paper is printed to PDF, so everything must be \
+legible in static ink -- no interactivity, and it must survive greyscale.
+- Reference every figure and table from the prose and caption it with what the reader should \
+take from it. A figure that just repeats the sentence beside it, or a two-row table, is worse \
+than nothing -- omit it. Reviewers judge whether each visual earns its space.
 
 Return the COMPLETE revised paper as a single self-contained HTML document in exactly the same \
 format and structure as the version above. No markdown code fences, no commentary before or \
@@ -237,11 +271,7 @@ def execute_student_work_job(
         conn.commit()
         return "not_claimed"
 
-    result = jobs.run_with_session(
-        conn,
-        job_id,
-        backend,
-        WORK_PROMPT_TEMPLATE.format(
+    work_prompt = WORK_PROMPT_TEMPLATE.format(
             root_problem=lab["root_problem"],
             brief=brief,
             title=task["title"],
@@ -249,14 +279,50 @@ def execute_student_work_job(
             end_criteria=task["end_criteria"],
             memory=memory,
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
-        )
+            corpus=ingest.render_corpus(conn, lab["id"], lab_dir),
+            tool_docs=tools.TOOL_DOCS.format(
+                timeout=tools.VERIFY_TIMEOUT_SECONDS,
+                max_calls=tools.MAX_TOOL_CALLS_PER_ROUND,
+                max_series=len(tools.SERIES_COLOURS),
+            ),
     )
+    result = jobs.run_with_session(conn, job_id, backend, work_prompt)
 
     if result.rate_limited:
         jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
+
+    # Bounded tool loop: run whatever the student called, hand the results
+    # back, let them revise. Capped at MAX_TOOL_ROUNDS so a student cannot
+    # spend a job cycling on tools instead of producing work.
+    prompt_so_far = work_prompt
+    for _ in range(MAX_TOOL_ROUNDS):
+        calls = tools.parse_tool_calls(result.text)
+        if not calls:
+            break
+        tool_results = tools.execute_tool_calls(
+            conn,
+            calls,
+            lab_id=lab["id"],
+            task_id=task["id"],
+            student_id=student["id"],
+            lab_dir=lab_dir,
+        )
+        prompt_so_far = (
+            f"{prompt_so_far}\n\n--- your previous response ---\n{result.text}\n\n"
+            f"{tool_results}\n\nNow produce your complete updated working memory, taking the "
+            "tool results into account. You may call tools again if you genuinely need to."
+        )
+        follow_up = jobs.run_with_session(conn, job_id, backend, prompt_so_far)
+        if follow_up.rate_limited:
+            jobs.record_rate_limit(conn, job_id, lease_id, follow_up.retry_after_seconds)
+            return "rate_limited"
+        if follow_up.is_error or not follow_up.text.strip():
+            # Keep the pre-tool response rather than losing the work.
+            break
+        result = follow_up
 
     # Belt and braces alongside the backend's own empty-output check:
     # memory.md is overwritten wholesale, so writing an empty result would
@@ -268,7 +334,11 @@ def execute_student_work_job(
             conn, job_id, lease_id, "backend returned empty work output; refusing to erase memory"
         )
 
-    write_artifact(lab_dir / student["memory_path"], result.text)
+    # §7: snapshot before overwriting. memory.md is replaced wholesale
+    # each pass, so without a checkpoint one bad write is unrecoverable.
+    memory_file = lab_dir / student["memory_path"]
+    checkpoint_artifact(memory_file)
+    write_artifact(memory_file, result.text)
     # Report to the supervisor rather than writing up immediately. The
     # professor decides whether this is ready (docs/DESIGN.md §3.2, and
     # autoprof/supervision.py) -- catching "not actually proved yet" here
@@ -335,6 +405,7 @@ def execute_student_write_paper_job(
             end_criteria=task["end_criteria"],
             memory=memory,
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
+            reference_bank=references.render_for_prompt(conn),
             template=template,
         )
     )
@@ -452,6 +523,7 @@ def execute_student_revise_paper_job(
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             memory=memory,
+            reference_bank=references.render_for_prompt(conn),
             paper=paper_file.read_text(),
             reviews="\n\n".join(reviews),
         ),
@@ -492,6 +564,172 @@ def execute_student_revise_paper_job(
         target_type="paper",
         target_id=paper["id"],
         payload_path=paper["path"],
+    )
+    conn.commit()
+    return "done"
+
+
+_TEMPLATE_RULES = """Rules:
+- Replace every {{placeholder}} and remove every class="fillme" marker -- an unfilled \
+placeholder left in the document is an automatic reject at review.
+- Remove the template's leading HTML authoring comment from your output.
+- Section 4 (Result) MUST state explicitly whether this is a PROOF, a DISPROOF, or another \
+kind of result. Reviewers check this first.
+- Section 4 must contain the complete, checkable argument -- every step, every assumption. \
+Not a sketch. Number lemmas and steps using the provided environments so a reviewer can \
+point at exactly the step they disagree with.
+- Related Work must be honest about what was already known. Reviewers assess novelty \
+against exactly that section, and overclaiming there is the fastest way to be rejected.
+- Discussion & Limitations must honestly state what the result does NOT show.
+- Do not claim a stronger result than your working memory actually supports.
+- Write it as a person would, not as a filled-in template. Give the reader a narrative: \
+why the problem matters, the idea of the argument in plain terms BEFORE its formal execution, \
+and signposting between sections. Do not write sections that merely restate their own titles.
+- Include figures, tables and diagrams wherever the content has shape a reader would otherwise \
+have to reconstruct: a function plotted across its parameter range, exact values tabulated, a \
+case breakdown, the structure of a counterexample, a comparison against prior bounds. Draw them \
+as inline <svg> using the template's figure/table environments, following the colour and axis \
+rules in the template's authoring comment. The paper is printed to PDF, so everything must be \
+legible in static ink -- no interactivity, and it must survive greyscale.
+- Reference every figure and table from the prose and caption it with what the reader should \
+take from it. A figure that just repeats the sentence beside it, or a two-row table, is worse \
+than nothing -- omit it. Reviewers judge whether each visual earns its space.
+"""
+
+
+COLLAB_PAPER_PROMPT_TEMPLATE = """You are writing up a JOINT paper with several co-authors, \
+based on the collaboration's agreed shared state.
+
+Your lab's root problem:
+<root_problem>
+{root_problem}
+</root_problem>
+
+Goal of the collaboration:
+<goal>
+{goal}
+</goal>
+
+The agreed shared state of the joint work -- this is what the paper must present:
+<shared_state>
+{shared}
+</shared_state>
+
+{reference_bank}
+
+This paper has {n_authors} authors. Write it as one voice, not as stitched-together sections: \
+a single narrative with consistent notation throughout. It must contain a unifying result that \
+none of the individual contributions had on its own -- if the paper reads as three separate \
+results placed side by side, it has failed.
+
+{template_rules}
+
+<template>
+{template}
+</template>
+
+Respond with ONLY the HTML document. No markdown code fences, no commentary.
+"""
+
+
+def execute_collaboration_write_paper_job(
+    conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
+) -> str:
+    """Write the joint paper and record every author on it."""
+    from . import collaboration
+
+    lease_id = uuid.uuid4().hex
+    if not jobs.claim_job(conn, job_id, lease_id, lease_seconds=3600):
+        return "not_claimed"
+
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    collab = conn.execute(
+        "SELECT * FROM collaborations WHERE task_id = ?", (row["target_id"],)
+    ).fetchone()
+    if collab is None:
+        return jobs.fail_job(conn, job_id, lease_id, f"no collaboration on task {row['target_id']}")
+
+    try:
+        task, student, lab, _memory, _brief = _load_context(conn, collab["task_id"], lab_dir)
+    except PaperError as e:
+        return jobs.fail_job(conn, job_id, lease_id, str(e))
+
+    live = conn.execute(
+        "SELECT COUNT(*) AS n FROM papers WHERE task_id = ? AND status IN ('draft', 'in_review')",
+        (task["id"],),
+    ).fetchone()["n"]
+    if live > 0:
+        jobs.complete_job(conn, job_id, lease_id)
+        return "done"
+
+    shared_file = lab_dir / collab["memory_path"]
+    if not shared_file.exists():
+        return jobs.fail_job(conn, job_id, lease_id, f"shared state missing: {collab['memory_path']}")
+
+    template = _LEADING_HTML_COMMENT_RE.sub("", _PAPER_TEMPLATE_PATH.read_text(), count=1)
+    members = conn.execute(
+        "SELECT COUNT(*) AS n FROM collaboration_members WHERE collaboration_id = ?",
+        (collab["id"],),
+    ).fetchone()["n"]
+
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
+        COLLAB_PAPER_PROMPT_TEMPLATE.format(
+            root_problem=lab["root_problem"],
+            goal=collab["goal"],
+            shared=shared_file.read_text(),
+            n_authors=members,
+            reference_bank=references.render_for_prompt(conn),
+            template_rules=_TEMPLATE_RULES,
+            template=template,
+        ),
+    )
+
+    if result.rate_limited:
+        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        return "rate_limited"
+    if result.is_error:
+        return jobs.fail_job(conn, job_id, lease_id, result.error)
+
+    html = _strip_fence(result.text)
+    if "<h1" not in html.lower():
+        return jobs.fail_job(
+            conn, job_id, lease_id, f"joint paper output is not an HTML document: {html[:300]}"
+        )
+
+    cur = conn.execute(
+        "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+        "VALUES (?, ?, 'pending', ?, 'in_review', 1)",
+        (task["id"], student["id"], extract_title(html, task["title"])),
+    )
+    paper_id = cur.lastrowid
+    relpath = f"{lab['id']}/tasks/{task['id']}/papers/{paper_id}/paper.html"
+    conn.execute("UPDATE papers SET path = ? WHERE id = ?", (relpath, paper_id))
+    write_artifact(lab_dir / relpath, html)
+
+    authors = collaboration.record_authors(conn, paper_id, collab["id"])
+    conn.execute("UPDATE collaborations SET status='concluded' WHERE id=?", (collab["id"],))
+    for author_id in authors:
+        conn.execute("UPDATE students SET status='in_review' WHERE id=?", (author_id,))
+
+    from .paper_review import request_paper_review
+
+    request_paper_review(conn, paper_id)
+
+    if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
+        return "not_claimed"
+
+    record_job_event(
+        conn,
+        job_id=job_id,
+        actor_type="student",
+        actor_id=student["id"],
+        event_type="joint_paper_submitted",
+        target_type="paper",
+        target_id=paper_id,
+        payload_path=relpath,
     )
     conn.commit()
     return "done"

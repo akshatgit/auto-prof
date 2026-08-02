@@ -345,5 +345,30 @@ class RevisePaperJobTests(unittest.TestCase):
         conn.close()
 
 
+class ExpositionRequirementTests(unittest.TestCase):
+    """Papers must read as human-written and use visuals where they earn
+    their space -- rubric criterion 5."""
+
+    def test_write_up_prompt_demands_figures_and_narrative(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            job_id = _enqueue(conn, "student_write_paper", ids["task_id"])
+            backend = ScriptedBackend(BackendResult(text=MINIMAL_PAPER))
+            paper.execute_student_write_paper_job(conn, job_id, backend, Path(d))
+        prompt = backend.calls[0]
+        self.assertIn("inline <svg>", prompt)
+        self.assertIn("as a person would", prompt)
+        self.assertIn("greyscale", prompt)
+        conn.close()
+
+    def test_template_carries_the_validated_series_colours(self):
+        template = paper._PAPER_TEMPLATE_PATH.read_text()
+        for hexcode in ("#2a78d6", "#eb6834", "#1baf7a", "#eda100"):
+            self.assertIn(hexcode, template)
+        # One y-axis per plot is a hard rule, not a suggestion.
+        self.assertIn("One y-axis per plot", template)
+
+
 if __name__ == "__main__":
     unittest.main()

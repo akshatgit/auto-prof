@@ -180,6 +180,213 @@ END;
 -- round gets a fresh set of reviewer verdicts (see `reviews.review_round`
 -- below); the paper row itself is reused rather than duplicated so the
 -- accepted/rejected history stays attached to one paper identity.
+-- Tool runs: computations and figures students produced mechanically.
+--
+-- Students reason about finite combinatorial claims ("this system has
+-- defect 1/2", "the rank-five spectrum is X") with no way to CHECK them,
+-- and draw figures freehand. Both are mechanisable, and a checked claim
+-- is worth far more at review than an asserted one.
+--
+-- Every run is recorded rather than being an invisible side effect: a
+-- paper that says "verified by exhaustive search" must be traceable to
+-- the exact program that was run and the exact output it produced.
+-- Available to every lab -- these are lab-agnostic capabilities.
+CREATE TABLE tool_runs (
+    id         INTEGER PRIMARY KEY,
+    lab_id     INTEGER NOT NULL REFERENCES labs(id),
+    task_id    INTEGER REFERENCES tasks(id),
+    student_id INTEGER REFERENCES students(id),
+    tool       TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch')),
+    -- The program or chart spec the student supplied, and what came back.
+    input_path  TEXT NOT NULL,
+    output_path TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
+    summary    TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_tool_runs_task ON tool_runs(task_id, created_at);
+
+
+-- Research uploaded by the lab's founder to bootstrap it.
+--
+-- A lab founded from a one-line idea has nothing concrete to stand on;
+-- one founded from the founder's actual papers and notes starts from
+-- their established results. These documents are a THIRD category,
+-- distinct from both published literature and internal lab results:
+-- they are real and their full text is available in the lab, but they
+-- may be unpublished, so a reviewer cannot necessarily look them up.
+-- Conflating the three is exactly the mistake that made a student cite
+-- internal work as though it were published.
+CREATE TABLE source_documents (
+    id         INTEGER PRIMARY KEY,
+    lab_id     INTEGER NOT NULL REFERENCES labs(id),
+    title      TEXT NOT NULL,
+    -- lab/<lab_id>/sources/<id>-<slug>.txt -- the extracted text, so
+    -- students read the same content regardless of the original format.
+    path       TEXT NOT NULL,
+    -- Original filename, kept so provenance survives the extraction.
+    origin     TEXT NOT NULL,
+    -- Content hash of the extracted text: detects a re-upload of the same
+    -- document under a different name, and pins what students actually read.
+    sha256     TEXT NOT NULL,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (lab_id, sha256)
+);
+
+
+-- Shared reference bank: the lab's collective bibliographic memory.
+--
+-- Motivated by a real failure: a citation with a fabricated title reached
+-- three separate papers before a reviewer looked up the actual record.
+-- Students had no authoritative source for references, so each invented
+-- plausible-looking ones independently.
+--
+-- GLOBAL, not lab-scoped. A reference is a fact about the world; scoping
+-- it per lab duplicates entries and lets two labs hold different titles
+-- for the same work, which is precisely how the bad citation survived.
+-- It is also what makes this a shared memory across labs and sessions:
+-- a lab's accepted papers enrol here and become citable by later work.
+CREATE TABLE reference_works (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('internal_paper', 'external_work')),
+    title       TEXT NOT NULL,
+    authors     TEXT NOT NULL,
+    venue       TEXT,
+    year        INTEGER,
+    -- arXiv id, DOI or URL. UNIQUE so the same work cannot be entered
+    -- twice under two different titles -- the failure mode above.
+    identifier  TEXT UNIQUE,
+    -- Papers this lab produced point back at their row; external works
+    -- leave it NULL.
+    paper_id    INTEGER REFERENCES papers(id),
+    -- 'verified' means someone confirmed this work exists AND that title,
+    -- authors and venue match the real record. Students may cite verified
+    -- entries; anything else must be declared an assumption rather than
+    -- presented as a source.
+    status      TEXT NOT NULL CHECK (status IN ('unverified', 'verified', 'disputed')),
+    verified_at TEXT,
+    notes       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_reference_works_status ON reference_works(status);
+
+-- Provenance edges: which paper cited which reference. When a reference
+-- is later found wrong, this is what identifies every contaminated paper
+-- instead of guessing -- the selective-traceback case from the resilience
+-- design, applied to bibliography.
+CREATE TABLE reference_citations (
+    paper_id     INTEGER NOT NULL REFERENCES papers(id),
+    reference_id INTEGER NOT NULL REFERENCES reference_works(id),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (paper_id, reference_id)
+);
+
+
+-- Multi-student collaboration.
+--
+-- The original model was one task -> one student -> one paper, which has
+-- no way to express "these three results are one paper". Combining them
+-- is not concatenation: the students must read each other's work, resolve
+-- conflicting lemmas, and agree a single narrative -- so it needs its own
+-- long-horizon loop, the same shape as supervision.
+--
+-- A collaboration is ANCHORED TO A TASK rather than replacing it. That
+-- keeps every existing invariant intact: students.task_id stays UNIQUE
+-- (one student per task, which is what prevents two students racing onto
+-- the same work), papers.task_id still points at a real task, and the
+-- trg_papers_student_assigned trigger still holds because the paper's
+-- papers.student_id is the anchor task's assigned student -- the lead
+-- author. Co-authors are carried in paper_authors.
+CREATE TABLE collaborations (
+    id             INTEGER PRIMARY KEY,
+    lab_id         INTEGER NOT NULL REFERENCES labs(id),
+    -- The anchor task: where the combined work lives and who leads it.
+    task_id        INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+    goal           TEXT NOT NULL,   -- what combining these results is meant to achieve
+    status         TEXT NOT NULL CHECK (status IN
+                       ('working', 'writing', 'concluded', 'abandoned')),
+    round          INTEGER NOT NULL DEFAULT 0 CHECK (round >= 0),
+    -- Shared working memory, distinct from any member's own memory.md.
+    -- This is the agreed joint state; members' individual memories stay
+    -- theirs and are not overwritten by the collaboration.
+    memory_path    TEXT NOT NULL,   -- lab/<lab_id>/collaborations/<id>/memory.md
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE collaboration_members (
+    collaboration_id INTEGER NOT NULL REFERENCES collaborations(id),
+    student_id       INTEGER NOT NULL REFERENCES students(id),
+    -- Exactly one lead: the anchor task's assigned student, who is also
+    -- papers.student_id. Enforced by trg_collaboration_single_lead.
+    role             TEXT NOT NULL CHECK (role IN ('lead', 'co')),
+    joined_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (collaboration_id, student_id)
+);
+
+CREATE TRIGGER trg_collaboration_single_lead
+BEFORE INSERT ON collaboration_members
+WHEN NEW.role = 'lead'
+BEGIN
+    SELECT RAISE(ABORT, 'a collaboration has exactly one lead author')
+    WHERE EXISTS (
+        SELECT 1 FROM collaboration_members
+        WHERE collaboration_id = NEW.collaboration_id AND role = 'lead'
+    );
+END;
+
+-- One contribution per member per round: what each student brought to
+-- that round, kept separately so the synthesis step can see who said what
+-- and so a disagreement is attributable rather than silently merged away.
+CREATE TABLE collaboration_contributions (
+    id               INTEGER PRIMARY KEY,
+    collaboration_id INTEGER NOT NULL REFERENCES collaborations(id),
+    student_id       INTEGER NOT NULL REFERENCES students(id),
+    round            INTEGER NOT NULL CHECK (round >= 1),
+    path             TEXT NOT NULL,  -- .../collaborations/<id>/rounds/<round>/<student_id>.md
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (collaboration_id, student_id, round)
+);
+
+-- Multi-author papers. papers.student_id remains the lead/corresponding
+-- author (and must stay consistent with the anchor task); this table adds
+-- every author including that lead, with an explicit order so the byline
+-- is deterministic rather than dependent on row order.
+CREATE TABLE paper_authors (
+    paper_id     INTEGER NOT NULL REFERENCES papers(id),
+    student_id   INTEGER NOT NULL REFERENCES students(id),
+    author_order INTEGER NOT NULL CHECK (author_order >= 1),
+    PRIMARY KEY (paper_id, student_id),
+    UNIQUE (paper_id, author_order)
+);
+
+
+-- Structured failure memory (§18 of the resilience design).
+--
+-- Every terminal failure and every successful recovery writes a row, so
+-- the same dead remediation is not retried on the next occurrence and a
+-- preventive rule can be surfaced to whoever plans the next attempt.
+-- Distinct from `events`, which records what happened: this records what
+-- was WRONG, what fixed it, and what should be done differently.
+CREATE TABLE failure_memories (
+    id                   INTEGER PRIMARY KEY,
+    job_id               INTEGER REFERENCES jobs(id),
+    classification       TEXT NOT NULL,   -- see autoprof/recovery.py DOMAINS
+    symptom              TEXT NOT NULL,   -- the observed error, trimmed
+    target_type          TEXT,
+    target_id            INTEGER,
+    successful_remediation TEXT,          -- NULL if nothing worked
+    failed_remediations  TEXT,            -- newline-separated, in order tried
+    preventive_rule      TEXT,
+    resolved             INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_failure_memories_class ON failure_memories(classification, created_at);
+
+
 -- Supervision meetings: the iterative student<->professor loop that runs
 -- BEFORE a paper is written (docs/DESIGN.md §3.2 step 1-2).
 --
@@ -365,7 +572,18 @@ CREATE TABLE jobs (
                                       -- 'professor_callback', 'memory_compact'
     target_type     TEXT NOT NULL,   -- 'task' | 'paper' | 'defense' | 'lab' | 'lab_proposal' | 'professor' | 'student'
     target_id       INTEGER NOT NULL,
-    status          TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+    -- 'cancelled' exists so a job is NEVER removed by DELETE. SQLite
+    -- reuses a freed rowid, so deleting a job lets a later INSERT take its
+    -- id while a daemon may still hold that id in flight -- observed once
+    -- as a job whose recorded kind and recorded event disagreed. Cancel by
+    -- marking; the row and its id then live forever.
+    status          TEXT NOT NULL CHECK (status IN
+                        ('pending', 'running', 'done', 'failed', 'cancelled')),
+
+    -- Stable operation identity (§4). jobs.id is a rowid and therefore
+    -- reusable; operation_id never is. Side-effecting work and failure
+    -- memories reference this, so identity survives any row churn.
+    operation_id    TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16)))),
 
     -- Only meaningful for review-kind jobs ('lab_review', and future
     -- 'paper_review'/'defense_review' dispatch) -- which reviewer slot

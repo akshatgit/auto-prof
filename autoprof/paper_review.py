@@ -17,7 +17,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import config, db, jobs
+from . import config, db, jobs, references
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -223,6 +223,9 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         conn.execute(
             "UPDATE tasks SET status = 'pending_prof_review' WHERE id = ?", (paper["task_id"],)
         )
+        # Enrol in the shared reference bank so later students -- and
+        # later labs -- can cite this result as established work.
+        references.register_accepted_paper(conn, paper_id)
     elif _accepted_paper_count(conn, paper["task_id"]) < config.max_accepted_papers():
         # Revise-and-resubmit (§3.2 step 4). Without this a rejected paper
         # is a dead end -- the same gap `lab revise` closed for labs. The

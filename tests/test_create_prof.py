@@ -102,6 +102,7 @@ class AutoRequestsLabReviewTests(unittest.TestCase):
             yes=True,
             dry_run=False,
             no_review=False,
+            no_references=True,
             db_path=Path(tmp) / "autoprof.db",
             lab_dir=Path(tmp) / "lab",
             config_path=Path(tmp) / "missing.toml",

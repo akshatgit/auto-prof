@@ -18,6 +18,14 @@ Evaluate strictly on:
    correctly and honestly represent what was already known? Is the claimed
    contribution actually new relative to that prior art, not just relative
    to a narrower reading of it?
+   **Internal lab results are a distinct case.** A paper may cite work
+   this lab produced and accepted through its own review, labelled as an
+   internal report rather than published literature. Such a citation is
+   legitimate and should not be treated as fabricated merely because you
+   cannot find it externally — but it also carries no weight as prior
+   art, so a novelty or priority claim resting on an internal result
+   alone is unsupported. An internal result presented AS published
+   literature is a defect.
    **Check the references themselves, not just the prose.** For every
    citation the argument leans on, confirm the work exists and that the
    title, authors and venue given actually match it. A fabricated or
@@ -40,6 +48,30 @@ Evaluate strictly on:
 4. **Significance.** Assuming correctness, does the result actually
    resolve (or make real progress on) the stated problem, or is it a
    restatement / trivial corollary dressed up as a result?
+5. **Exposition.** Does this read as a paper a person wrote, or as a
+   template filled in? Specifically:
+   - **Prose.** Is there a narrative a reader can follow — motivation,
+     the idea of the argument stated before its formal execution,
+     signposting between sections — or is it a wall of formalism with
+     section headings? Boilerplate phrasing, sections that restate their
+     own titles, and results presented with no explanation of *why* they
+     are true are defects.
+   - **Figures, tables and diagrams.** Where the content admits a visual
+     — a function's shape, a case breakdown, a counterexample's
+     structure, exact values across a parameter range, a comparison to
+     prior bounds — is one present? A paper that states a step function
+     in prose without plotting it, or enumerates cases without tabulating
+     them, is harder to read than it needs to be. Every figure and table
+     must be referenced from the text and carry a caption that says what
+     the reader should take from it.
+   - **Restraint.** Decoration is also a defect. A figure that encodes
+     nothing the sentence beside it doesn't already say, a table with two
+     rows, or a chart of data that isn't there yet all count against the
+     paper rather than for it. Judge whether each visual earns its space.
+
+   Exposition alone should not sink a correct, significant result — but a
+   paper that is genuinely hard to read because it made no attempt to be
+   readable has not finished the job, and should not reach the top tier.
 
 Be skeptical by default. A `strong_accept` should be reserved for work you
 would be willing to stake your own reputation on endorsing — not merely

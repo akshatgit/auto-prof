@@ -23,6 +23,10 @@ GENERATION_KINDS = {
     "student_write_paper",
     "student_revise_paper",
     "professor_supervision",
+    "collaboration_round",
+    "collaboration_synthesis",
+    "collaboration_write_paper",
+    "reference_verify",
     "professor_callback",
     "memory_compact",
 }

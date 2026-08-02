@@ -27,6 +27,12 @@ DEFAULT_MAX_ACCEPTED_PAPERS = 4
 # it. Set generously -- real supervision is long-horizon.
 DEFAULT_MAX_SUPERVISION_ROUNDS = 12
 
+# Ceiling on collaboration rounds. Same reasoning as supervision: a
+# backstop so a collaboration that never converges terminates, not a
+# target. Lower than supervision because each round costs one model call
+# per member, so the cost grows with the author count.
+DEFAULT_MAX_COLLABORATION_ROUNDS = 6
+
 _CONFIG_PATH = db.REPO_ROOT / "autoprof.toml"
 
 
@@ -88,3 +94,22 @@ def max_supervision_rounds(config_path: Path | None = None, env: dict | None = N
             pass
 
     return DEFAULT_MAX_SUPERVISION_ROUNDS
+
+
+def max_collaboration_rounds(config_path: Path | None = None, env: dict | None = None) -> int:
+    """Ceiling on collaboration rounds. A backstop; hitting it writes the
+    joint paper rather than discarding the work."""
+    env = env if env is not None else os.environ
+    raw = env.get("AUTOPROF_MAX_COLLABORATION_ROUNDS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_collaboration_rounds")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_COLLABORATION_ROUNDS

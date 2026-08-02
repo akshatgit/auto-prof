@@ -30,6 +30,10 @@ def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 # does not belong here.
 _ADDITIVE_MIGRATIONS = (
     ("jobs", "backend_session_id", "TEXT"),
+    # Stable operation identity (§4). Cannot carry the UNIQUE constraint
+    # here -- SQLite's ADD COLUMN rejects UNIQUE -- so existing rows are
+    # backfilled below and the uniqueness is enforced by a separate index.
+    ("jobs", "operation_id", "TEXT"),
 )
 
 # Tables added after the schema first shipped. Mirrors the corresponding
@@ -53,6 +57,152 @@ _ADDITIVE_TABLES = (
         "idx_supervisions_task",
         "CREATE INDEX idx_supervisions_task ON supervisions(task_id, round)",
     ),
+    (
+        "tool_runs",
+        """CREATE TABLE tool_runs (
+            id          INTEGER PRIMARY KEY,
+            lab_id      INTEGER NOT NULL REFERENCES labs(id),
+            task_id     INTEGER REFERENCES tasks(id),
+            student_id  INTEGER REFERENCES students(id),
+            tool        TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch')),
+            input_path  TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            status      TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
+            summary     TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+    ),
+    (
+        "idx_tool_runs_task",
+        "CREATE INDEX idx_tool_runs_task ON tool_runs(task_id, created_at)",
+    ),
+    (
+        "source_documents",
+        """CREATE TABLE source_documents (
+            id         INTEGER PRIMARY KEY,
+            lab_id     INTEGER NOT NULL REFERENCES labs(id),
+            title      TEXT NOT NULL,
+            path       TEXT NOT NULL,
+            origin     TEXT NOT NULL,
+            sha256     TEXT NOT NULL,
+            word_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (lab_id, sha256)
+        )""",
+    ),
+    (
+        "reference_works",
+        """CREATE TABLE reference_works (
+            id          INTEGER PRIMARY KEY,
+            kind        TEXT NOT NULL CHECK (kind IN ('internal_paper', 'external_work')),
+            title       TEXT NOT NULL,
+            authors     TEXT NOT NULL,
+            venue       TEXT,
+            year        INTEGER,
+            identifier  TEXT UNIQUE,
+            paper_id    INTEGER REFERENCES papers(id),
+            status      TEXT NOT NULL CHECK (status IN ('unverified', 'verified', 'disputed')),
+            verified_at TEXT,
+            notes       TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+    ),
+    (
+        "idx_reference_works_status",
+        "CREATE INDEX idx_reference_works_status ON reference_works(status)",
+    ),
+    (
+        "reference_citations",
+        """CREATE TABLE reference_citations (
+            paper_id     INTEGER NOT NULL REFERENCES papers(id),
+            reference_id INTEGER NOT NULL REFERENCES reference_works(id),
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (paper_id, reference_id)
+        )""",
+    ),
+    (
+        "collaborations",
+        """CREATE TABLE collaborations (
+            id          INTEGER PRIMARY KEY,
+            lab_id      INTEGER NOT NULL REFERENCES labs(id),
+            task_id     INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+            goal        TEXT NOT NULL,
+            status      TEXT NOT NULL CHECK (status IN
+                            ('working', 'writing', 'concluded', 'abandoned')),
+            round       INTEGER NOT NULL DEFAULT 0 CHECK (round >= 0),
+            memory_path TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+    ),
+    (
+        "collaboration_members",
+        """CREATE TABLE collaboration_members (
+            collaboration_id INTEGER NOT NULL REFERENCES collaborations(id),
+            student_id       INTEGER NOT NULL REFERENCES students(id),
+            role             TEXT NOT NULL CHECK (role IN ('lead', 'co')),
+            joined_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (collaboration_id, student_id)
+        )""",
+    ),
+    (
+        "trg_collaboration_single_lead",
+        """CREATE TRIGGER trg_collaboration_single_lead
+        BEFORE INSERT ON collaboration_members
+        WHEN NEW.role = 'lead'
+        BEGIN
+            SELECT RAISE(ABORT, 'a collaboration has exactly one lead author')
+            WHERE EXISTS (
+                SELECT 1 FROM collaboration_members
+                WHERE collaboration_id = NEW.collaboration_id AND role = 'lead'
+            );
+        END""",
+    ),
+    (
+        "collaboration_contributions",
+        """CREATE TABLE collaboration_contributions (
+            id               INTEGER PRIMARY KEY,
+            collaboration_id INTEGER NOT NULL REFERENCES collaborations(id),
+            student_id       INTEGER NOT NULL REFERENCES students(id),
+            round            INTEGER NOT NULL CHECK (round >= 1),
+            path             TEXT NOT NULL,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (collaboration_id, student_id, round)
+        )""",
+    ),
+    (
+        "paper_authors",
+        """CREATE TABLE paper_authors (
+            paper_id     INTEGER NOT NULL REFERENCES papers(id),
+            student_id   INTEGER NOT NULL REFERENCES students(id),
+            author_order INTEGER NOT NULL CHECK (author_order >= 1),
+            PRIMARY KEY (paper_id, student_id),
+            UNIQUE (paper_id, author_order)
+        )""",
+    ),
+    (
+        "failure_memories",
+        """CREATE TABLE failure_memories (
+            id                     INTEGER PRIMARY KEY,
+            job_id                 INTEGER REFERENCES jobs(id),
+            classification         TEXT NOT NULL,
+            symptom                TEXT NOT NULL,
+            target_type            TEXT,
+            target_id              INTEGER,
+            successful_remediation TEXT,
+            failed_remediations    TEXT,
+            preventive_rule        TEXT,
+            resolved               INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+            created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+    ),
+    (
+        "idx_failure_memories_class",
+        "CREATE INDEX idx_failure_memories_class ON failure_memories(classification, created_at)",
+    ),
+    (
+        "idx_jobs_operation_id",
+        "CREATE UNIQUE INDEX idx_jobs_operation_id ON jobs(operation_id)",
+    ),
 )
 
 
@@ -74,6 +224,13 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # Backfill operation_id before its unique index is created, or the
+    # index build fails on pre-existing rows sharing a NULL-free default.
+    if conn.execute("SELECT COUNT(*) FROM jobs WHERE operation_id IS NULL").fetchone()[0]:
+        conn.execute(
+            "UPDATE jobs SET operation_id = lower(hex(randomblob(16))) WHERE operation_id IS NULL"
+        )
 
     _apply_missing_tables(conn)
     conn.commit()
