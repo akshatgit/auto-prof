@@ -17,13 +17,19 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import db, jobs
+from . import config, db, jobs
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
 
 REVIEWER_COUNT = 3
 STRONG_ACCEPT_THRESHOLD = 2
+
+# The revise-and-resubmit loop stops when the LAB has enough accepted
+# papers, not after a fixed number of rounds -- see autoprof/config.py's
+# max_accepted_papers. A round cap measured effort spent and abandoned
+# papers whose only defect was fixable; the accepted-paper target measures
+# what the lab actually produced.
 
 _RUBRIC_PATH = db.REPO_ROOT / "templates" / "review_rubric.md"
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(\w+)\s*$", re.MULTILINE)
@@ -113,7 +119,9 @@ def execute_paper_review_job(
     if not paper_file.exists():
         return jobs.fail_job(conn, job_id, lease_id, f"paper file missing: {paper['path']}")
 
-    result = backend.run(build_review_prompt(paper_file.read_text()))
+    result = jobs.run_with_session(
+        conn, job_id, backend, build_review_prompt(paper_file.read_text())
+    )
 
     if result.rate_limited:
         jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
@@ -162,14 +170,32 @@ def execute_paper_review_job(
     return "done"
 
 
+def _accepted_paper_count(conn: sqlite3.Connection, task_id: int) -> int:
+    """Accepted papers across the whole lab that owns `task_id`.
+
+    Lab-wide, not per-task: the target is how much the lab has produced,
+    and papers from different tasks all count toward it.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM papers "
+        "JOIN tasks ON tasks.id = papers.task_id "
+        "WHERE papers.status = 'accepted' AND tasks.lab_id = "
+        "(SELECT lab_id FROM tasks WHERE id = ?)",
+        (task_id,),
+    ).fetchone()
+    return row["n"]
+
+
 def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, job_id: int) -> None:
     """Once all REVIEWER_COUNT reviews for this round are in, tally.
 
     Pass  -> paper accepted, student back to 'working', task handed to the
              professor for the §3.3 callback decision.
-    Fail  -> paper rejected, student back to 'working' to revise; a fresh
-             round is NOT auto-requested, because §3.3 gives the professor
-             the choice between revising, re-scoping, and abandoning.
+    Fail  -> paper rejected and a student_revise_paper job is enqueued so
+             the student revises against the reviewers' objections and
+             resubmits (§3.2 step 4) -- unless the lab has already reached
+             its accepted-paper target, in which case the paper stays
+             rejected and the re-scope/abandon call goes to the professor.
     """
     reported = conn.execute(
         "SELECT COUNT(*) AS n FROM reviews WHERE target_type='paper' AND target_id=? AND review_round=?",
@@ -196,6 +222,17 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
     if passed:
         conn.execute(
             "UPDATE tasks SET status = 'pending_prof_review' WHERE id = ?", (paper["task_id"],)
+        )
+    elif _accepted_paper_count(conn, paper["task_id"]) < config.max_accepted_papers():
+        # Revise-and-resubmit (§3.2 step 4). Without this a rejected paper
+        # is a dead end -- the same gap `lab revise` closed for labs. The
+        # loop keeps going until the lab reaches its accepted-paper target;
+        # once it has, a further rejection stops here and leaves the
+        # re-scope/abandon call to the professor (§3.3).
+        conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_revise_paper', 'paper', ?, 'pending')",
+            (paper_id,),
         )
 
     record_job_event(

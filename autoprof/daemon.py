@@ -109,10 +109,16 @@ def dispatch_pending_jobs(
     autoprof/lab_review.py)."""
     special_handlers = special_handlers or {}
     dispatched = 0
+    # Ordered by attempts first, then age. Strict FIFO let one repeatedly
+    # failing job hold a budget slot every tick forever: observed live as a
+    # student_work job that consumed a slot on each of three attempts while
+    # six ready paper_review jobs behind it never started once. Preferring
+    # untried work means a struggling job still makes progress -- it just
+    # yields to jobs that have not had their turn yet.
     candidate_rows = conn.execute(
         "SELECT id, kind FROM jobs WHERE status='pending' "
         "AND (not_before IS NULL OR not_before <= datetime('now')) "
-        "ORDER BY created_at LIMIT ?",
+        "ORDER BY attempts, created_at LIMIT ?",
         (max(budget_cap * 4, budget_cap),),
     ).fetchall()
 

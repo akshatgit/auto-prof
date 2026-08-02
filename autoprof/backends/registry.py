@@ -21,6 +21,8 @@ GENERATION_KINDS = {
     "professor_decompose",
     "student_work",
     "student_write_paper",
+    "student_revise_paper",
+    "professor_supervision",
     "professor_callback",
     "memory_compact",
 }

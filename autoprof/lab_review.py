@@ -124,7 +124,7 @@ def execute_lab_review_job(
     if lab is None:
         return jobs.fail_job(conn, job_id, lease_id, f"lab {row['target_id']} no longer exists")
 
-    result = backend.run(_build_prompt(lab["root_problem"]))
+    result = jobs.run_with_session(conn, job_id, backend, _build_prompt(lab["root_problem"]))
 
     if result.rate_limited:
         jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)

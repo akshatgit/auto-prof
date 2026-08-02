@@ -180,6 +180,36 @@ END;
 -- round gets a fresh set of reviewer verdicts (see `reviews.review_round`
 -- below); the paper row itself is reused rather than duplicated so the
 -- accepted/rejected history stays attached to one paper identity.
+-- Supervision meetings: the iterative student<->professor loop that runs
+-- BEFORE a paper is written (docs/DESIGN.md §3.2 step 1-2).
+--
+-- Without this the student worked once and wrote up immediately, so the
+-- professor first saw the research as a finished paper and the only
+-- feedback channel was peer review -- which is far too late and far more
+-- expensive. Each row is one meeting: the professor read the student's
+-- current memory and either sent them back to work with guidance, agreed
+-- it was ready to write up, or abandoned the line of attack.
+--
+-- Kept as its own table rather than folded into student memory.md because
+-- both sides need their own durable record: memory.md is overwritten
+-- wholesale by the student each round, and the professor's guidance must
+-- survive that to accumulate across a long research horizon.
+CREATE TABLE supervisions (
+    id            INTEGER PRIMARY KEY,
+    task_id       INTEGER NOT NULL REFERENCES tasks(id),
+    student_id    INTEGER NOT NULL REFERENCES students(id),
+    round         INTEGER NOT NULL CHECK (round >= 1),
+    verdict       TEXT NOT NULL CHECK (verdict IN ('continue', 'ready', 'abandon')),
+    guidance_path TEXT NOT NULL,   -- lab/<lab_id>/tasks/<task_id>/supervision/<round>.md
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- One meeting per round per task: a duplicate would double-advance the
+    -- loop and let two contradictory guidances both count as "the latest".
+    UNIQUE (task_id, round)
+);
+
+CREATE INDEX idx_supervisions_task ON supervisions(task_id, round);
+
+
 CREATE TABLE papers (
     id              INTEGER PRIMARY KEY,
     task_id         INTEGER NOT NULL REFERENCES tasks(id),
@@ -372,6 +402,14 @@ CREATE TABLE jobs (
     model_version   TEXT,   -- e.g. 'claude-sonnet-5' / 'codex-...'; set once the job completes.
                              -- Lets a multi-year run correlate output-quality shifts with
                              -- model version changes -- see docs/DESIGN.md §6.5
+
+    -- Backend-side conversation id (Codex `thread_id`), captured from the
+    -- first attempt and reused by every later one. A job that dies partway
+    -- -- token/usage exhaustion, a crash -- is resumed with `codex exec
+    -- resume <id>` on retry instead of restarting from an empty context,
+    -- so a long derivation isn't thrown away and re-paid for. NULL until
+    -- a backend that supports sessions has run at least once.
+    backend_session_id TEXT,
 
     started_at      TEXT,   -- set when claimed (status -> running)
     completed_at    TEXT,   -- set when status -> done or failed (terminal)

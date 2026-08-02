@@ -26,6 +26,13 @@ class BackendResult:
     retry_after_seconds: float | None = None
     error: str | None = None
 
+    # Backend-side conversation id, when the backend has one (Codex's
+    # thread_id). Set on EVERY outcome the backend can report -- especially
+    # the failures -- because its whole purpose is to let the next attempt
+    # resume the work this attempt could not finish. A session id reported
+    # only on success would be useless.
+    session_id: str | None = None
+
     @property
     def is_error(self) -> bool:
         return self.error is not None
@@ -45,5 +52,11 @@ class Backend(ABC):
         callers have one uniform way to branch on outcome regardless of
         which backend ran. Only truly unexpected conditions (e.g. a bug)
         should raise.
+
+        Recognized opt: `resume_session_id` -- a `session_id` from an
+        earlier BackendResult for this same job. Backends that support
+        resumption continue that conversation instead of starting fresh;
+        backends that don't must ignore it rather than fail, so a job
+        whose backend changed between attempts still runs.
         """
         raise NotImplementedError

@@ -1,5 +1,8 @@
+import tempfile
+from pathlib import Path
 import http.client
 import threading
+from pathlib import Path
 import unittest
 
 from autoprof import webserver
@@ -145,6 +148,64 @@ class LiveServerTests(unittest.TestCase):
     def test_unknown_route_is_404(self):
         status, body = self._get("/nope")
         self.assertEqual(status, 404)
+
+
+class PaperMathRenderingTests(unittest.TestCase):
+    """Papers are mathematics; without MathJax they display as literal
+    \\( ... \\) source."""
+
+    def test_mathjax_injected_into_a_paper_lacking_it(self):
+        doc = "<html><head><title>P</title></head><body><h1>P</h1>\\(x\\)</body></html>"
+        out = webserver._ensure_mathjax(doc)
+        self.assertIn("mathjax", out.lower())
+        self.assertIn("<h1>P</h1>", out)
+
+    def test_injection_is_idempotent(self):
+        doc = "<html><head><title>P</title></head><body>\\(x\\)</body></html>"
+        once = webserver._ensure_mathjax(doc)
+        self.assertEqual(webserver._ensure_mathjax(once), once)
+
+    def test_paper_already_carrying_mathjax_is_untouched(self):
+        doc = "<html><head><script src='x/mathjax@3/y.js'></script></head><body></body></html>"
+        self.assertEqual(webserver._ensure_mathjax(doc), doc)
+
+    def test_document_with_no_head_still_gets_mathjax(self):
+        doc = "<h1>bare fragment</h1>\\(x\\)"
+        self.assertIn("mathjax", webserver._ensure_mathjax(doc).lower())
+
+
+class PlainPreviewTests(unittest.TestCase):
+    def test_latex_is_stripped_for_list_previews(self):
+        raw = r"Let \(( E,\mathcal I )\) be a system with \[\frac{a}{b}\]"
+        out = webserver._plain_preview(raw)
+        self.assertNotIn("\\mathcal", out)
+        self.assertNotIn("{", out)
+        self.assertIn("Let", out)
+
+    def test_preview_is_truncated_with_ellipsis(self):
+        out = webserver._plain_preview("word " * 100, limit=20)
+        self.assertTrue(out.endswith("..."))
+        self.assertLessEqual(len(out), 23)
+
+
+class ArtifactPathTests(unittest.TestCase):
+    def test_path_traversal_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "lab"
+            root.mkdir()
+            (Path(d) / "secret.txt").write_text("nope")
+            self.assertIsNone(webserver._read_artifact(root, "../secret.txt"))
+
+    def test_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(webserver._read_artifact(Path(d), "nope.html"))
+
+    def test_reads_a_file_inside_lab_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sub").mkdir()
+            (root / "sub" / "p.html").write_text("hello")
+            self.assertEqual(webserver._read_artifact(root, "sub/p.html"), "hello")
 
 
 if __name__ == "__main__":

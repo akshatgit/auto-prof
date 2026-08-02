@@ -171,8 +171,34 @@ student is never left pointing at a closed task:
 
 ### 3.2 Student work loop
 
-1. Student works the task's problem.
-2. On reaching a candidate result, drafts a paper from
+0. **Supervision loop (`autoprof/supervision.py`).** The student does NOT
+   write up unilaterally. Each `student_work` pass ends by reporting to
+   the professor (`professor_supervision`), who reads the student's full
+   working memory plus every previous meeting's guidance and returns one
+   of:
+   - `continue` — with specific, actionable guidance; a fresh
+     `student_work` job is queued and the guidance is injected into the
+     student's next prompt (most recent foregrounded, earlier as context).
+   - `ready` — the work could survive independent review; only then is
+     `student_write_paper` queued.
+   - `abandon` — the line of attack is dead; the task is abandoned and the
+     student released.
+
+   This is deliberately **long-horizon**: it runs until the professor
+   agrees, not for a fixed number of passes. `[lab] max_supervision_rounds`
+   (default 12) is a termination backstop only, and reaching it forces a
+   write-up rather than discarding the research.
+
+   Rationale: without this the professor first saw the work as a finished
+   paper, so the only corrective channel was peer review — three
+   independent reviewers, after the fact. Catching "you haven't actually
+   proved this yet" costs one job here and a full review round there.
+   Meetings are rows in `supervisions` rather than notes in `memory.md`,
+   because the student overwrites memory wholesale each pass and the
+   guidance must survive that to accumulate.
+
+1. Student works the task's problem, incorporating supervisor guidance.
+2. Once the professor says `ready`, drafts a paper from
    `templates/paper_template.html` — a self-contained ACM sigconf-style
    HTML document (two-column, CSS-numbered sections/theorems, ACM
    reference format). The paper artifact is written as `paper.html`;

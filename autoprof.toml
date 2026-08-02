@@ -11,3 +11,15 @@ review = "codex"              # independent paper/defense review (docs/DESIGN.md
 # defense review on a different model than paper review:
 # [backends.overrides]
 # defense_review = "codex"
+
+# Lab policy.
+[lab]
+# How many ACCEPTED papers a lab works toward. A rejected paper is revised
+# and resubmitted until the lab reaches this count -- there is deliberately
+# no cap on revision rounds, because rounds measure effort spent while
+# accepted papers measure what the lab has to show for it.
+max_accepted_papers = 4
+# Ceiling on student<->professor supervision meetings per task. A backstop
+# so a non-converging loop terminates; the loop normally ends when the
+# professor says the work is ready.
+max_supervision_rounds = 12

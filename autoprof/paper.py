@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import db, jobs
+from . import db, jobs, supervision
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -51,6 +51,8 @@ Your working memory so far:
 {memory}
 </memory>
 
+{supervision}
+
 Now do the actual research work. Think hard and go as far as you can toward an actual \
 result -- not a plan for getting one. Specifically:
 
@@ -61,6 +63,9 @@ characterised partial result with the obstruction identified, is worth far more 
 an overclaimed positive one -- your work will be reviewed by independent reviewers who \
 will check each step and reject the paper if any step fails.
 - Record dead ends you tried so you don't repeat them.
+- If your supervisor gave you guidance above, address it directly and say what you did about \
+each point. If you disagree with a point, say so explicitly and explain why -- do not silently \
+ignore it.
 
 Write your response as your complete updated working memory: current status, the full \
 derivation or argument as it stands, what remains open, dead ends, and your next step.
@@ -81,6 +86,8 @@ Your complete working memory from doing the research:
 <memory>
 {memory}
 </memory>
+
+{supervision}
 
 Write the paper as a single self-contained HTML document, following the template below \
 EXACTLY -- same structure, same CSS, same section order, same class names. The template's \
@@ -106,6 +113,54 @@ against exactly that section, and overclaiming there is the fastest way to be re
 - Do not claim a stronger result than your working memory actually supports.
 
 Respond with ONLY the HTML document. No markdown code fences, no commentary before or \
+after it.
+"""
+
+
+REVISE_PROMPT_TEMPLATE = """You are a PhD student revising a paper that was REJECTED in peer review.
+
+Your lab's root problem:
+<root_problem>
+{root_problem}
+</root_problem>
+
+Your task: "{title}" (direction: {direction})
+End criteria: {end_criteria}
+
+Your working memory from the research:
+<memory>
+{memory}
+</memory>
+
+This is the paper as submitted:
+<paper>
+{paper}
+</paper>
+
+The independent reviewers said the following. They did not see each other's reviews, so where \
+two of them raise the same point independently, treat it as certainly real:
+<reviews>
+{reviews}
+</reviews>
+
+Produce a revised version of the paper that addresses every reviewer objection. Specifically:
+
+- Fix every factual and bibliographic error they identify. If a reviewer says a citation has the \
+wrong title or is missing, correct it to the real work -- do NOT invent a plausible-looking \
+reference, and do not cite anything you cannot vouch for. If you cannot verify a citation, \
+remove the claim that depends on it or state it as an assumption.
+- Where a reviewer says a claim is unsupported or an attribution is untraceable, either support \
+it properly or explicitly label it as an assumption inherited from the problem statement.
+- Strengthen Related Work to honestly position the contribution against the prior art the \
+reviewers named. Do not overclaim novelty.
+- Do NOT weaken, overstate, or quietly change the mathematical results to make them look better. \
+If a reviewer found a genuine mathematical error, fix the mathematics and say so plainly. If the \
+reviewers agreed the mathematics is correct, keep it as it is.
+- Address scope criticism by stating precisely what is and is not resolved, rather than by \
+claiming more than you proved.
+
+Return the COMPLETE revised paper as a single self-contained HTML document in exactly the same \
+format and structure as the version above. No markdown code fences, no commentary before or \
 after it.
 """
 
@@ -182,7 +237,10 @@ def execute_student_work_job(
         conn.commit()
         return "not_claimed"
 
-    result = backend.run(
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
         WORK_PROMPT_TEMPLATE.format(
             root_problem=lab["root_problem"],
             brief=brief,
@@ -190,6 +248,7 @@ def execute_student_work_job(
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             memory=memory,
+            supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
         )
     )
 
@@ -199,11 +258,24 @@ def execute_student_work_job(
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
 
+    # Belt and braces alongside the backend's own empty-output check:
+    # memory.md is overwritten wholesale, so writing an empty result would
+    # destroy everything the student has established so far and leave the
+    # write-up job nothing to work from. Fail the job instead -- the
+    # research is recoverable by retry, an erased memory is not.
+    if not result.text.strip():
+        return jobs.fail_job(
+            conn, job_id, lease_id, "backend returned empty work output; refusing to erase memory"
+        )
+
     write_artifact(lab_dir / student["memory_path"], result.text)
-    conn.execute("UPDATE students SET status = 'writing_paper' WHERE id = ?", (student["id"],))
+    # Report to the supervisor rather than writing up immediately. The
+    # professor decides whether this is ready (docs/DESIGN.md §3.2, and
+    # autoprof/supervision.py) -- catching "not actually proved yet" here
+    # costs one job, catching it at peer review costs three reviews.
     conn.execute(
         "INSERT INTO jobs (kind, target_type, target_id, status) "
-        "VALUES ('student_write_paper', 'task', ?, 'pending')",
+        "VALUES ('professor_supervision', 'task', ?, 'pending')",
         (task["id"],),
     )
 
@@ -252,13 +324,17 @@ def execute_student_write_paper_job(
 
     template = _LEADING_HTML_COMMENT_RE.sub("", _PAPER_TEMPLATE_PATH.read_text(), count=1)
 
-    result = backend.run(
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
         PAPER_PROMPT_TEMPLATE.format(
             root_problem=lab["root_problem"],
             title=task["title"],
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             memory=memory,
+            supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
             template=template,
         )
     )
@@ -307,6 +383,115 @@ def execute_student_write_paper_job(
         target_type="paper",
         target_id=paper_id,
         payload_path=relpath,
+    )
+    conn.commit()
+    return "done"
+
+
+def execute_student_revise_paper_job(
+    conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
+) -> str:
+    """Revise a rejected paper against its reviewers' objections, then
+    resubmit it for a fresh round.
+
+    docs/DESIGN.md §3.2 step 4. Without this a rejected paper was a dead
+    end -- exactly the gap `lab revise` closed at the lab level. The
+    revision overwrites the paper in place and the round is bumped by
+    `resubmit_paper`, so every round's reviews stay addressable by round
+    number while the paper itself is a single evolving document.
+
+    Targets the PAPER, not the task: a task can accumulate several papers
+    over its life, and it is one specific rejected paper being revised.
+    """
+    lease_id = uuid.uuid4().hex
+    if not jobs.claim_job(conn, job_id, lease_id, lease_seconds=3600):
+        return "not_claimed"
+
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    paper = conn.execute("SELECT * FROM papers WHERE id = ?", (row["target_id"],)).fetchone()
+    if paper is None:
+        return jobs.fail_job(conn, job_id, lease_id, f"no paper with id={row['target_id']}")
+    if paper["status"] != "rejected":
+        # Not an error worth retrying: the paper was already resubmitted or
+        # accepted by another path, so this job has nothing left to do.
+        jobs.complete_job(conn, job_id, lease_id)
+        return "done"
+
+    try:
+        task, student, lab, memory, _brief = _load_context(conn, paper["task_id"], lab_dir)
+    except PaperError as e:
+        return jobs.fail_job(conn, job_id, lease_id, str(e))
+
+    paper_file = lab_dir / paper["path"]
+    if not paper_file.exists():
+        return jobs.fail_job(conn, job_id, lease_id, f"paper file missing: {paper['path']}")
+
+    review_rows = conn.execute(
+        "SELECT * FROM reviews WHERE target_type='paper' AND target_id=? AND review_round=? "
+        "ORDER BY reviewer_index",
+        (paper["id"], paper["review_round"]),
+    ).fetchall()
+    if not review_rows:
+        return jobs.fail_job(
+            conn, job_id, lease_id, f"paper {paper['id']} has no reviews to revise against"
+        )
+
+    reviews = []
+    for review in review_rows:
+        rationale_file = lab_dir / review["rationale_path"]
+        body = rationale_file.read_text() if rationale_file.exists() else "(rationale missing)"
+        reviews.append(f"--- Reviewer {review['reviewer_index']} ({review['verdict']}) ---\n{body}")
+
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
+        REVISE_PROMPT_TEMPLATE.format(
+            root_problem=lab["root_problem"],
+            title=task["title"],
+            direction=task["direction"],
+            end_criteria=task["end_criteria"],
+            memory=memory,
+            paper=paper_file.read_text(),
+            reviews="\n\n".join(reviews),
+        ),
+    )
+
+    if result.rate_limited:
+        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        return "rate_limited"
+    if result.is_error:
+        return jobs.fail_job(conn, job_id, lease_id, result.error)
+
+    html = _strip_fence(result.text)
+    if "<h1" not in html.lower():
+        return jobs.fail_job(
+            conn, job_id, lease_id, f"revision is not an HTML document: {html[:300]}"
+        )
+
+    write_artifact(lab_dir / paper["path"], html)
+    conn.execute(
+        "UPDATE papers SET title = ? WHERE id = ?",
+        (extract_title(html, task["title"]), paper["id"]),
+    )
+    conn.execute("UPDATE students SET status = 'in_review' WHERE id = ?", (student["id"],))
+
+    from .paper_review import resubmit_paper
+
+    resubmit_paper(conn, paper["id"])
+
+    if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
+        return "not_claimed"
+
+    record_job_event(
+        conn,
+        job_id=job_id,
+        actor_type="student",
+        actor_id=student["id"],
+        event_type="paper_revised",
+        target_type="paper",
+        target_id=paper["id"],
+        payload_path=paper["path"],
     )
     conn.commit()
     return "done"

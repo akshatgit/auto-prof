@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 from autoprof import daemon
@@ -280,6 +281,43 @@ class OnTickCallbackTests(unittest.TestCase):
 class _NullRegistry:
     def get_backend(self, kind):
         raise AssertionError("no jobs should be dispatched in these tests")
+
+
+class DispatchOrderingTests(unittest.TestCase):
+    def test_untried_jobs_are_preferred_over_repeatedly_failed_ones(self):
+        """A job that keeps failing must not starve ready work behind it."""
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        old_failing = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status, attempts, created_at) "
+            "VALUES ('student_work', 'task', ?, 'pending', 3, '2020-01-01 00:00:00')",
+            (ids["task_id"],),
+        ).lastrowid
+        newer_fresh = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status, attempts, created_at) "
+            "VALUES ('student_work', 'task', ?, 'pending', 0, '2030-01-01 00:00:00')",
+            (ids["task_id"],),
+        ).lastrowid
+        conn.commit()
+
+        dispatched = []
+
+        class _Reg:
+            def get_backend(self, kind):
+                return SimpleNamespace(name="fake")
+
+        def handler(conn_, job_id, backend, lab_dir):
+            dispatched.append(job_id)
+            return "done"
+
+        daemon.dispatch_pending_jobs(
+            conn, _Reg(), {}, Path("/tmp"), budget_cap=1,
+            special_handlers={"student_work": handler},
+        )
+
+        self.assertEqual(dispatched, [newer_fresh])
+        self.assertNotIn(old_failing, dispatched)
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -262,5 +262,87 @@ class ResubmitPaperTests(unittest.TestCase):
         conn.close()
 
 
+class RevisionEnqueueTests(unittest.TestCase):
+    def _reject(self, conn, ids, lab_dir, paper_id=None):
+        if paper_id is None:
+            paper_id = _seed_paper(conn, ids, lab_dir)
+        job_ids = paper_review.request_paper_review(conn, paper_id)
+        for job_id in job_ids:
+            paper_review.execute_paper_review_job(
+                conn, job_id, ScriptedBackend([_verdict("weak_accept")]), lab_dir
+            )
+        return paper_id
+
+    def test_rejection_enqueues_a_revision_job(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            paper_id = self._reject(conn, ids, Path(d))
+
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='student_revise_paper'"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target_type"], "paper")
+        self.assertEqual(rows[0]["target_id"], paper_id)
+        conn.close()
+
+    def test_acceptance_enqueues_no_revision(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = _seed_paper(conn, ids, lab_dir)
+            job_ids = paper_review.request_paper_review(conn, paper_id)
+            for job_id in job_ids:
+                paper_review.execute_paper_review_job(
+                    conn, job_id, ScriptedBackend([_verdict("strong_accept")]), lab_dir
+                )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'").fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_no_revision_once_the_lab_hits_its_accepted_paper_target(self):
+        """The loop stops on what the lab produced, not on rounds spent."""
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            for _ in range(paper_review.config.max_accepted_papers()):
+                conn.execute(
+                    "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+                    "VALUES (?, ?, 'x.html', 'done', 'accepted', 1)",
+                    (ids["task_id"], ids["student_id"]),
+                )
+            conn.commit()
+            self._reject(conn, ids, lab_dir)
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'").fetchone()[0],
+            0,
+        )
+        conn.close()
+
+    def test_revision_continues_below_the_target_regardless_of_round(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = _seed_paper(conn, ids, lab_dir)
+            # Round 9 -- far past any old round cap; with zero accepted
+            # papers the lab must still keep trying.
+            conn.execute("UPDATE papers SET review_round=9 WHERE id=?", (paper_id,))
+            conn.commit()
+            self._reject(conn, ids, lab_dir, paper_id=paper_id)
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'").fetchone()[0],
+            1,
+        )
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

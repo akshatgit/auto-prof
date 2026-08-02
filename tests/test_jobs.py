@@ -1,6 +1,7 @@
 import unittest
 
 from autoprof import jobs
+from autoprof.backends.base import BackendResult
 from tests.helpers import fresh_db, seed_lab_with_student
 
 
@@ -236,6 +237,117 @@ class ReclaimExpiredLeasesTests(unittest.TestCase):
         self.assertEqual(expired_row["status"], "pending")
         self.assertIsNone(expired_row["lease_id"])
         self.assertEqual(fresh_row["status"], "running")
+        conn.close()
+
+
+class _SessionBackend:
+    """Records the opts it was called with and reports a session id."""
+
+    name = "session-fake"
+
+    def __init__(self, session_id="sess-1", **result_kw):
+        self.session_id = session_id
+        self.result_kw = result_kw
+        self.calls = []
+
+    def run(self, prompt, **opts):
+        self.calls.append(opts)
+        return BackendResult(text="ok", session_id=self.session_id, **self.result_kw)
+
+
+def _job(conn, kind="student_work"):
+    ids = seed_lab_with_student(conn)
+    cur = conn.execute(
+        "INSERT INTO jobs (kind, target_type, target_id, status) VALUES (?, 'task', ?, 'running')",
+        (kind, ids["task_id"]),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+class RunWithSessionTests(unittest.TestCase):
+    def test_first_call_has_no_resume_id_and_records_the_new_one(self):
+        conn = fresh_db()
+        job_id = _job(conn)
+        backend = _SessionBackend("sess-1")
+
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+
+        self.assertNotIn("resume_session_id", backend.calls[0])
+        stored = conn.execute(
+            "SELECT backend_session_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()[0]
+        self.assertEqual(stored, "sess-1")
+        conn.close()
+
+    def test_second_call_resumes_the_recorded_session(self):
+        conn = fresh_db()
+        job_id = _job(conn)
+        backend = _SessionBackend("sess-1")
+
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+
+        self.assertEqual(backend.calls[1]["resume_session_id"], "sess-1")
+        conn.close()
+
+    def test_session_is_persisted_even_when_the_call_errored(self):
+        """The whole point: a job that died mid-work must still be
+        resumable on its next attempt."""
+        conn = fresh_db()
+        job_id = _job(conn)
+        backend = _SessionBackend("sess-9", error="died partway")
+
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+
+        stored = conn.execute(
+            "SELECT backend_session_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()[0]
+        self.assertEqual(stored, "sess-9")
+        conn.close()
+
+    def test_session_is_persisted_on_token_exhaustion(self):
+        conn = fresh_db()
+        job_id = _job(conn)
+        backend = _SessionBackend("sess-tok", rate_limited=True)
+
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+
+        stored = conn.execute(
+            "SELECT backend_session_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()[0]
+        self.assertEqual(stored, "sess-tok")
+        conn.close()
+
+    def test_backend_without_sessions_is_tolerated(self):
+        """A backend that reports no session_id must not break the job --
+        it just always starts fresh."""
+        conn = fresh_db()
+        job_id = _job(conn)
+
+        class _NoSession:
+            name = "no-session"
+
+            def run(self, prompt, **opts):
+                return BackendResult(text="ok")
+
+        jobs.run_with_session(conn, job_id, _NoSession(), "prompt")
+
+        stored = conn.execute(
+            "SELECT backend_session_id FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()[0]
+        self.assertIsNone(stored)
+        conn.close()
+
+    def test_explicit_resume_id_is_not_overridden(self):
+        conn = fresh_db()
+        job_id = _job(conn)
+        backend = _SessionBackend("sess-1")
+        jobs.run_with_session(conn, job_id, backend, "prompt")
+
+        jobs.run_with_session(conn, job_id, backend, "prompt", resume_session_id="caller-choice")
+
+        self.assertEqual(backend.calls[1]["resume_session_id"], "caller-choice")
         conn.close()
 
 

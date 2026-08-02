@@ -122,6 +122,36 @@ def record_rate_limit(
     return True
 
 
+def run_with_session(conn: sqlite3.Connection, job_id: int, backend, prompt: str, **opts):
+    """Call `backend` for `job_id`, carrying its backend session across attempts.
+
+    Every handler goes through this instead of calling `backend.run`
+    directly, so resumption is uniform: attempt 1 starts a fresh session
+    and records its id; attempts 2..N resume that session. A job killed by
+    token exhaustion mid-derivation therefore continues from where it
+    stopped rather than re-deriving (and re-paying for) everything.
+
+    The id is persisted on every outcome, including failures -- that is
+    precisely the case it exists for -- and committed immediately, so a
+    daemon that dies between the backend call and the job's own state
+    write still leaves the session recoverable.
+    """
+    row = conn.execute("SELECT backend_session_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    previous = row["backend_session_id"] if row is not None else None
+    if previous:
+        opts.setdefault("resume_session_id", previous)
+
+    result = backend.run(prompt, **opts)
+
+    session_id = getattr(result, "session_id", None)
+    if session_id and session_id != previous:
+        conn.execute(
+            "UPDATE jobs SET backend_session_id = ? WHERE id = ?", (session_id, job_id)
+        )
+        conn.commit()
+    return result
+
+
 def reclaim_expired_leases(conn: sqlite3.Connection) -> int:
     """Reset `running` jobs whose lease has expired back to `pending`.
     §5.2 -- this only handles the "lease expired" half; the write-time

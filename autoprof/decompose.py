@@ -211,7 +211,10 @@ def execute_professor_decompose_job(
         jobs.complete_job(conn, job_id, lease_id)
         return "done"
 
-    result = backend.run(
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
         DECOMPOSE_PROMPT_TEMPLATE.format(
             name=professor["name"],
             field=professor["field"],

@@ -55,7 +55,7 @@ class ExtractTitleTests(unittest.TestCase):
 
 
 class StudentWorkJobTests(unittest.TestCase):
-    def test_writes_memory_and_enqueues_write_paper_job(self):
+    def test_writes_memory_and_reports_to_the_supervisor(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         job_id = _enqueue(conn, "student_work", ids["task_id"])
@@ -69,16 +69,17 @@ class StudentWorkJobTests(unittest.TestCase):
                 (lab_dir / ids["student_memory_path"]).read_text(), "I proved the lemma."
             )
 
-        student = conn.execute(
-            "SELECT * FROM students WHERE id=?", (ids["student_id"],)
-        ).fetchone()
-        self.assertEqual(student["status"], "writing_paper")
-
+        # The student no longer writes up unilaterally: the professor
+        # decides whether the work is ready (autoprof/supervision.py).
         followup = conn.execute(
-            "SELECT * FROM jobs WHERE kind='student_write_paper'"
+            "SELECT * FROM jobs WHERE kind='professor_supervision'"
         ).fetchall()
         self.assertEqual(len(followup), 1)
         self.assertEqual(followup[0]["target_id"], ids["task_id"])
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_write_paper'").fetchone()[0],
+            0,
+        )
         conn.close()
 
     def test_paused_student_is_skipped_without_burning_an_attempt(self):
@@ -201,6 +202,146 @@ class StudentWritePaperJobTests(unittest.TestCase):
         # The template's own authoring comment is guidance for whoever
         # edits the template, not for the student writing the paper.
         self.assertNotIn("auto-prof paper template", prompt)
+        conn.close()
+
+
+class EmptyWorkOutputTests(unittest.TestCase):
+    def test_empty_work_output_fails_without_erasing_memory(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = _enqueue(conn, "student_work", ids["task_id"])
+        backend = ScriptedBackend(BackendResult(text="   "))
+
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            memory = lab_dir / ids["student_memory_path"]
+            memory.parent.mkdir(parents=True)
+            memory.write_text("hard-won prior research")
+
+            outcome = paper.execute_student_work_job(conn, job_id, backend, lab_dir)
+
+            self.assertIn(outcome, ("retrying", "failed"))
+            self.assertEqual(memory.read_text(), "hard-won prior research")
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_write_paper'").fetchone()[0],
+            0,
+        )
+        conn.close()
+
+
+class RevisePaperJobTests(unittest.TestCase):
+    def _rejected_paper(self, conn, ids, lab_dir):
+        cur = conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'Old Title', 'rejected', 1)",
+            (ids["task_id"], ids["student_id"]),
+        )
+        paper_id = cur.lastrowid
+        relpath = f"{ids['lab_id']}/tasks/{ids['task_id']}/papers/{paper_id}/paper.html"
+        conn.execute("UPDATE papers SET path=? WHERE id=?", (relpath, paper_id))
+        f = lab_dir / relpath
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("<h1>Old Title</h1><p>v1</p>")
+
+        for i in (1, 2, 3):
+            rp = f"{ids['lab_id']}/reviews/p{paper_id}/{i}.md"
+            (lab_dir / rp).parent.mkdir(parents=True, exist_ok=True)
+            (lab_dir / rp).write_text(f"reviewer {i}: fix citation [2]")
+            conn.execute(
+                "INSERT INTO reviews (target_type,target_id,review_round,reviewer_index,verdict,rationale_path) "
+                "VALUES ('paper',?,1,?,'weak_accept',?)",
+                (paper_id, i, rp),
+            )
+        conn.commit()
+        return paper_id
+
+    def _enqueue_revise(self, conn, paper_id):
+        cur = conn.execute(
+            "INSERT INTO jobs (kind,target_type,target_id,status) "
+            "VALUES ('student_revise_paper','paper',?,'pending')",
+            (paper_id,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_revision_overwrites_paper_and_starts_round_two(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = self._rejected_paper(conn, ids, lab_dir)
+            job_id = self._enqueue_revise(conn, paper_id)
+            backend = ScriptedBackend(
+                BackendResult(text="<title>New Title</title><h1>New Title</h1><p>v2</p>")
+            )
+
+            outcome = paper.execute_student_revise_paper_job(conn, job_id, backend, lab_dir)
+            self.assertEqual(outcome, "done")
+
+            row = conn.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
+            self.assertEqual(row["status"], "in_review")
+            self.assertEqual(row["review_round"], 2)
+            self.assertEqual(row["title"], "New Title")
+            self.assertIn("v2", (lab_dir / row["path"]).read_text())
+
+            new_reviews = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='paper_review' AND review_round=2"
+            ).fetchone()[0]
+            self.assertEqual(new_reviews, 3)
+
+            # The prompt must actually carry the reviewers' objections.
+            self.assertIn("fix citation [2]", backend.calls[0])
+        conn.close()
+
+    def test_round_one_reviews_are_preserved(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = self._rejected_paper(conn, ids, lab_dir)
+            job_id = self._enqueue_revise(conn, paper_id)
+            paper.execute_student_revise_paper_job(
+                conn, job_id, ScriptedBackend(BackendResult(text="<h1>New</h1>")), lab_dir
+            )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM reviews WHERE target_type='paper' AND review_round=1"
+            ).fetchone()[0],
+            3,
+        )
+        conn.close()
+
+    def test_non_rejected_paper_is_a_noop(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = self._rejected_paper(conn, ids, lab_dir)
+            conn.execute("UPDATE papers SET status='accepted' WHERE id=?", (paper_id,))
+            conn.commit()
+            job_id = self._enqueue_revise(conn, paper_id)
+            backend = ScriptedBackend(BackendResult(text="<h1>New</h1>"))
+            outcome = paper.execute_student_revise_paper_job(conn, job_id, backend, lab_dir)
+
+        self.assertEqual(outcome, "done")
+        self.assertEqual(backend.calls, [])
+        conn.close()
+
+    def test_non_html_revision_fails_without_destroying_the_paper(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            paper_id = self._rejected_paper(conn, ids, lab_dir)
+            job_id = self._enqueue_revise(conn, paper_id)
+            outcome = paper.execute_student_revise_paper_job(
+                conn, job_id, ScriptedBackend(BackendResult(text="sorry, cannot")), lab_dir
+            )
+            self.assertIn(outcome, ("retrying", "failed"))
+            row = conn.execute("SELECT * FROM papers WHERE id=?", (paper_id,)).fetchone()
+            self.assertEqual(row["status"], "rejected")
+            self.assertIn("v1", (lab_dir / row["path"]).read_text())
         conn.close()
 
 

@@ -18,10 +18,21 @@ Evaluate strictly on:
    correctly and honestly represent what was already known? Is the claimed
    contribution actually new relative to that prior art, not just relative
    to a narrower reading of it?
+   **Check the references themselves, not just the prose.** For every
+   citation the argument leans on, confirm the work exists and that the
+   title, authors and venue given actually match it. A fabricated or
+   misattributed reference is a correctness failure, not a formatting nit:
+   it means a load-bearing claim has no verifiable source. State precisely
+   which entry is wrong and what the real one is.
 2. **Correctness.** If the document contains a proof, disproof, or
    derivation: check it step by step. A single invalid step is grounds for
    rejection regardless of how compelling the overall narrative is. State
    exactly which step, if any, fails.
+   Check the **degenerate and boundary cases** explicitly — rank or size
+   0 and 1, empty sets, equal quantities, division by a quantity that can
+   be zero. A theorem stated for "all n" that silently assumes n ≥ 2, or a
+   step that divides by a difference that can vanish, is an error even
+   when the main argument is sound.
 3. **Completeness.** Are all required sections present and substantive
    (not placeholders)? A proof/disproof claim (paper §4, or a defense
    chapter) that is a sketch rather than a checkable argument should not
@@ -33,6 +44,18 @@ Evaluate strictly on:
 Be skeptical by default. A `strong_accept` should be reserved for work you
 would be willing to stake your own reputation on endorsing — not merely
 "looks fine to me."
+
+Two calibration notes, because both failure directions are real:
+
+- **Judge significance against the problem the document set itself**, not
+  against the largest problem in the field. A deliberately scoped result
+  that is correct, complete, honestly positioned and genuinely settles
+  what it claimed to settle can merit `strong_accept`. "Narrow" is only a
+  reason to withhold it if the result is *also* routine — if it follows
+  immediately from what was already known once stated.
+- Conversely, do not let a confident narrative, heavy notation, or an
+  impressive-sounding framing substitute for a checked argument. If you
+  did not verify a step, do not endorse it.
 
 Write your review as:
 

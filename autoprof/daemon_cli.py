@@ -8,8 +8,13 @@ from .backends.registry import default_registry
 from .daemon import SingleInstanceLock, run_daemon
 from .decompose import execute_professor_decompose_job
 from .lab_review import execute_lab_review_job
-from .paper import execute_student_work_job, execute_student_write_paper_job
+from .paper import (
+    execute_student_revise_paper_job,
+    execute_student_work_job,
+    execute_student_write_paper_job,
+)
 from .paper_review import execute_paper_review_job
+from .supervision import execute_professor_supervision_job
 from .prompt_builders import default_builders
 
 # Every job kind in the research lifecycle needs more than one artifact
@@ -22,7 +27,9 @@ SPECIAL_HANDLERS = {
     "professor_decompose": execute_professor_decompose_job,
     "student_work": execute_student_work_job,
     "student_write_paper": execute_student_write_paper_job,
+    "student_revise_paper": execute_student_revise_paper_job,
     "paper_review": execute_paper_review_job,
+    "professor_supervision": execute_professor_supervision_job,
 }
 
 

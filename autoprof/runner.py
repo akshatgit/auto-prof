@@ -61,7 +61,7 @@ def execute_job(
     except Exception as e:  # noqa: BLE001 -- any builder failure must become a job failure, not a crash
         return jobs.fail_job(conn, job_id, lease_id, f"prompt builder raised: {e}")
 
-    result = backend.run(spec.prompt)
+    result = jobs.run_with_session(conn, job_id, backend, spec.prompt)
 
     if result.rate_limited:
         jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)

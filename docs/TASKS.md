@@ -186,6 +186,42 @@ Bugs this phase found and fixed (all pre-existing):
   full paper. Now 900s, overridable via `AUTOPROF_CODEX_TIMEOUT`, still
   inside the 1800s job lease.
 
+## Phase 4.7 — Supervision Loop + Review Calibration ✅ done
+
+The missing research element: the student worked once and wrote up
+immediately, so the professor never saw the work until it was a paper and
+peer review was the only corrective channel.
+
+- [x] `docs/schema.sql` — `supervisions` table (task, student, round,
+      verdict `continue|ready|abandon`, guidance path). Its own table, not
+      notes in `memory.md`: the student overwrites memory wholesale each
+      pass, and guidance must survive that to accumulate.
+- [x] `autoprof/db.py` — `_ADDITIVE_TABLES` + `_apply_missing_tables`, so a
+      running lab gains a new table without a rebuild. DDL is listed
+      literally rather than parsed out of schema.sql, because splitting
+      that file on `;` breaks on trigger bodies.
+- [x] `autoprof/supervision.py` — `professor_supervision`. Professor reads
+      the student's memory plus every prior meeting, then continues (with
+      *specific* guidance), declares ready, or abandons. `render_history`
+      (professor view, full record, so they can check whether their advice
+      was followed) and `render_student_guidance` (student view, latest
+      foregrounded) are deliberately different presentations of the same
+      rows — burying the current instruction in history is how guidance
+      gets ignored.
+- [x] `autoprof/paper.py` — `student_work` now enqueues
+      `professor_supervision`, never `student_write_paper` directly; both
+      the work and write-up prompts carry accumulated guidance.
+- [x] `[lab] max_supervision_rounds = 12` — a termination backstop, not a
+      target. Hitting it forces a write-up rather than discarding the
+      research: the work is real, only the appetite for more rounds ran out.
+- [x] `templates/review_rubric.md` recalibrated from this run's real
+      failures: reviewers must **verify references exist and match** (a
+      fabricated citation reached three papers before being caught);
+      must check **degenerate/boundary cases** (a `0/0` at A=B and an
+      omitted rank-1 case both slipped through); and significance is judged
+      **against the problem the document set itself**, since narrow-but-
+      correct work was being capped at accept-tier purely for scope.
+
 ## Phase 5 — CLI Surface Completion (partial)
 
 - [x] `autoprof lab list` / `review-request`.

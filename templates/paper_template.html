@@ -22,6 +22,25 @@
 -->
 <meta charset="utf-8">
 <title>{Title}</title>
+
+<!--
+  Math rendering. These papers are mathematics: without this the whole
+  document displays as literal \( ... \) and \[ ... \] source. Loaded from
+  a CDN, so a paper opened offline degrades to readable LaTeX rather than
+  breaking. Keep this block when producing a paper from the template.
+-->
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['\\(', '\\)']],
+      displayMath: [['\\[', '\\]'], ['$$', '$$']],
+      tags: 'none'
+    },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'code'] }
+  };
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
 <style>
   /* ---- page box: ACM sigconf geometry (US Letter, 0.75in side margins) ---- */
   @page {

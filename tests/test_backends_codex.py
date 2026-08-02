@@ -1,8 +1,10 @@
+import os
+from unittest import mock
 import subprocess
 import unittest
 from types import SimpleNamespace
 
-from autoprof.backends.codex import CodexBackend
+from autoprof.backends.codex import CodexBackend, parse_session_id
 
 
 def fake_runner_writing_output(output_text, returncode=0, stderr=""):
@@ -134,6 +136,135 @@ class StdinIsClosedTests(unittest.TestCase):
 
         CodexBackend(runner=fake_runner).run("hello")
         self.assertEqual(captured.get("stdin"), subprocess.DEVNULL)
+
+
+class NoWallClockLimitTests(unittest.TestCase):
+    def test_default_timeout_is_none(self):
+        """The 900s ceiling was ours, not Codex's, and it killed live jobs
+        mid-derivation. Default is now no limit."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(CodexBackend().timeout)
+
+    def test_env_var_can_reinstate_a_timeout(self):
+        with mock.patch.dict(os.environ, {"AUTOPROF_CODEX_TIMEOUT": "120"}, clear=True):
+            self.assertEqual(CodexBackend().timeout, 120.0)
+
+    def test_explicit_none_stays_none(self):
+        with mock.patch.dict(os.environ, {"AUTOPROF_CODEX_TIMEOUT": "120"}, clear=True):
+            self.assertIsNone(CodexBackend(timeout=None).timeout)
+
+    def test_timeout_none_is_passed_through_to_the_runner(self):
+        captured = {}
+
+        def fake_runner(cmd, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            CodexBackend(runner=fake_runner).run("hi")
+        self.assertIsNone(captured.get("timeout"))
+
+
+class SessionResumeTests(unittest.TestCase):
+    _EVENTS = (
+        '{"type":"thread.started","thread_id":"abc-123"}\n'
+        '{"type":"turn.completed","usage":{"output_tokens":5}}\n'
+    )
+
+    def test_parses_thread_id_from_json_events(self):
+        self.assertEqual(parse_session_id(self._EVENTS), "abc-123")
+
+    def test_ignores_non_json_noise(self):
+        noisy = "Reading additional input...\n" + self._EVENTS
+        self.assertEqual(parse_session_id(noisy), "abc-123")
+
+    def test_missing_id_degrades_to_none_not_a_crash(self):
+        self.assertIsNone(parse_session_id("no events here"))
+
+    def test_session_id_returned_on_success(self):
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=self._EVENTS, stderr="")
+
+        result = CodexBackend(runner=fake_runner).run("hi")
+        self.assertEqual(result.session_id, "abc-123")
+
+    def test_session_id_returned_on_error_so_retry_can_resume(self):
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(returncode=1, stdout=self._EVENTS, stderr="boom")
+
+        result = CodexBackend(runner=fake_runner).run("hi")
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.session_id, "abc-123")
+
+    def test_token_exhaustion_is_rate_limited_not_error(self):
+        """Token exhaustion must not burn a retry attempt, and must keep
+        the session so the next attempt continues the derivation."""
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=1,
+                stdout=self._EVENTS,
+                stderr="Error: maximum context length exceeded",
+            )
+
+        result = CodexBackend(runner=fake_runner).run("hi")
+        self.assertTrue(result.rate_limited)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.session_id, "abc-123")
+
+    def test_resume_session_id_builds_a_resume_command(self):
+        captured = {}
+
+        def fake_runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return SimpleNamespace(returncode=0, stdout=self._EVENTS, stderr="")
+
+        CodexBackend(runner=fake_runner).run("hi", resume_session_id="abc-123")
+        cmd = captured["cmd"]
+        self.assertEqual(cmd[:4], ["codex", "exec", "resume", "abc-123"])
+
+    def test_no_resume_id_means_a_fresh_exec(self):
+        captured = {}
+
+        def fake_runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return SimpleNamespace(returncode=0, stdout=self._EVENTS, stderr="")
+
+        CodexBackend(runner=fake_runner).run("hi")
+        self.assertEqual(captured["cmd"][:2], ["codex", "exec"])
+        self.assertNotIn("resume", captured["cmd"])
+
+
+class EmptyOutputTests(unittest.TestCase):
+    """A clean exit with no output is a failure. Treating it as an empty
+    success let a killed run silently erase a student's memory.md."""
+
+    _EVENTS = '{"type":"thread.started","thread_id":"abc-123"}\n'
+
+    def test_zero_exit_with_no_output_is_an_error(self):
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=self._EVENTS, stderr="")
+
+        result = CodexBackend(runner=fake_runner).run("hi")
+        self.assertTrue(result.is_error)
+        self.assertIn("no output", result.error)
+
+    def test_whitespace_only_output_is_an_error(self):
+        result = CodexBackend(
+            runner=fake_runner_writing_output("   \n\t ")
+        ).run("hi")
+        self.assertTrue(result.is_error)
+
+    def test_empty_output_still_reports_session_for_resume(self):
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=self._EVENTS, stderr="")
+
+        result = CodexBackend(runner=fake_runner).run("hi")
+        self.assertEqual(result.session_id, "abc-123")
+
+    def test_real_output_is_still_success(self):
+        result = CodexBackend(runner=fake_runner_writing_output("actual answer")).run("hi")
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.text, "actual answer")
 
 
 if __name__ == "__main__":
