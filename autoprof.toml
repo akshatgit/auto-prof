@@ -25,3 +25,5 @@ max_accepted_papers = 4
 max_supervision_rounds = 12
 # Ceiling on collaboration rounds between co-authoring students.
 max_collaboration_rounds = 6
+# Tasks a professor may open in one decomposition.
+max_tasks_per_decomposition = 6

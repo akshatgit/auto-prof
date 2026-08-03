@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import db, lab_review
+from . import create_prof, db, lab_review
 
 
 def common_args() -> argparse.ArgumentParser:
@@ -54,6 +54,84 @@ def _cmd_revise(args) -> int:
     return 0
 
 
+def _cmd_proposals(args) -> int:
+    conn = db.connect(args.db_path)
+    db.ensure_initialized(conn)
+    rows = conn.execute(
+        "SELECT * FROM lab_proposals WHERE status='pending_approval' ORDER BY id"
+    ).fetchall()
+    if not rows:
+        print("(no lab proposals awaiting approval)")
+    for row in rows:
+        print(f"#{row['id']}  from student {row['student_id']}")
+        print(f"    {row['proposed_name']}  ({row['proposed_field']})")
+        print(f"    {row['proposed_problem'][:300]}")
+    conn.close()
+    return 0
+
+
+def _cmd_approve(args) -> int:
+    """Approve a proposal: create the professor, the lab, and link them.
+
+    All three writes in ONE transaction. docs/DESIGN.md §3.5 and the
+    lab_proposals CHECK constraint both require that an 'approved' row
+    always carries both resulting ids -- a partially-applied approval is
+    the one bad state the schema explicitly refuses.
+    """
+    conn = db.connect(args.db_path)
+    db.ensure_initialized(conn)
+    proposal = conn.execute(
+        "SELECT * FROM lab_proposals WHERE id = ?", (args.proposal_id,)
+    ).fetchone()
+    if proposal is None:
+        print(f"error: no proposal #{args.proposal_id}")
+        conn.close()
+        return 1
+    if proposal["status"] != "pending_approval":
+        print(f"error: proposal #{args.proposal_id} is already {proposal['status']}")
+        conn.close()
+        return 1
+
+    if args.reject:
+        conn.execute(
+            "UPDATE lab_proposals SET status='rejected', decided_at=datetime('now') WHERE id=?",
+            (args.proposal_id,),
+        )
+        conn.commit()
+        print(f"proposal #{args.proposal_id} rejected")
+        conn.close()
+        return 0
+
+    try:
+        with conn:
+            professor_id, lab_id = create_prof.persist_professor(
+                conn,
+                proposal["proposed_name"],
+                proposal["proposed_field"],
+                proposal["proposed_problem"],
+                args.lab_dir,
+            )
+            conn.execute(
+                "UPDATE professors SET parent_student_id = ? WHERE id = ?",
+                (proposal["student_id"], professor_id),
+            )
+            conn.execute(
+                "UPDATE lab_proposals SET status='approved', resulting_professor_id=?, "
+                "resulting_lab_id=?, decided_at=datetime('now') WHERE id=?",
+                (professor_id, lab_id, args.proposal_id),
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"error: approval failed, nothing written: {e}")
+        conn.close()
+        return 1
+
+    job_ids = lab_review.request_lab_review(conn, lab_id)
+    print(f"approved: professor #{professor_id} now leads lab #{lab_id}")
+    print(f"lab is 'pending_review'; round-1 review requested: jobs {job_ids}")
+    conn.close()
+    return 0
+
+
 def _cmd_list(args) -> int:
     conn = db.connect(args.db_path)
     db.ensure_initialized(conn)
@@ -88,6 +166,19 @@ def add_subparser(subparsers) -> None:
     )
     sp.add_argument("lab_id", type=int)
     sp.set_defaults(func=_cmd_review_request)
+
+    sp = sub.add_parser("proposals", help="List lab proposals awaiting approval.", parents=[common])
+    sp.set_defaults(func=_cmd_proposals)
+
+    sp = sub.add_parser(
+        "approve",
+        help="Approve (or --reject) a lab proposal from a graduated student.",
+        parents=[common],
+    )
+    sp.add_argument("proposal_id", type=int)
+    sp.add_argument("--reject", action="store_true")
+    sp.add_argument("--lab-dir", type=Path, default=db.LAB_DIR)
+    sp.set_defaults(func=_cmd_approve)
 
     sp = sub.add_parser(
         "revise",

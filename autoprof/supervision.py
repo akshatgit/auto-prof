@@ -25,7 +25,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import config, jobs
+from . import assumptions, config, jobs
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -58,6 +58,8 @@ Your student's current working memory -- everything they have established so far
 {memory}
 </student_memory>
 
+{ledger}
+
 Read their work critically, as the person responsible for it. You are NOT a peer reviewer \
 writing a verdict on a finished paper; you are the supervisor deciding what happens next. \
 Independent reviewers will later check every step and reject the paper if any step fails, so \
@@ -72,6 +74,10 @@ that quietly assumes what it is trying to show.
 papers fail review.
 - Is anything missing that a reviewer will certainly ask for: edge cases (including degenerate \
 ones like rank/size 0 or 1), stated assumptions, honest positioning against prior work?
+- What is the work standing on that nobody has checked? Look at the assumption ledger above and \
+challenge at least one entry by name. Do not accept your own brief's framing just because you \
+wrote it -- a conjecture you set them is exactly the kind of thing that turns out false, and the \
+student who tests it has done better work than the one who assumes it.
 - Is the result significant enough to be worth writing up, or should the student push further \
 first? A narrow-but-correct result that reviewers call "elementary" is a real failure mode.
 
@@ -175,6 +181,7 @@ def execute_professor_supervision_job(
             round=round_,
             history=render_history(conn, task["id"], lab_dir),
             memory=memory,
+            ledger=assumptions.render(conn, task['id'], for_professor=True),
         ),
     )
 

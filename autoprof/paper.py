@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import db, ingest, jobs, references, supervision, tools
+from . import assumptions, db, ingest, jobs, references, supervision, tools
 from .artifacts import checkpoint_artifact, write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -58,6 +58,10 @@ Your working memory so far:
 {corpus}
 
 {tool_docs}
+
+{assumption_docs}
+
+{ledger}
 
 Now do the actual research work. Think hard and go as far as you can toward an actual \
 result -- not a plan for getting one. Specifically:
@@ -285,6 +289,8 @@ def execute_student_work_job(
                 max_calls=tools.MAX_TOOL_CALLS_PER_ROUND,
                 max_series=len(tools.SERIES_COLOURS),
             ),
+            assumption_docs=assumptions.ASSUMPTION_DOCS,
+            ledger=assumptions.render(conn, task["id"]),
     )
     result = jobs.run_with_session(conn, job_id, backend, work_prompt)
 
@@ -338,6 +344,13 @@ def execute_student_work_job(
     # each pass, so without a checkpoint one bad write is unrecoverable.
     memory_file = lab_dir / student["memory_path"]
     checkpoint_artifact(memory_file)
+    assumptions.record(
+        conn,
+        assumptions.parse_blocks(result.text),
+        lab_id=lab["id"],
+        task_id=task["id"],
+        student_id=student["id"],
+    )
     write_artifact(memory_file, result.text)
     # Report to the supervisor rather than writing up immediately. The
     # professor decides whether this is ready (docs/DESIGN.md §3.2, and

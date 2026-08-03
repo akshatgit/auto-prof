@@ -180,6 +180,44 @@ END;
 -- round gets a fresh set of reviewer verdicts (see `reviews.review_round`
 -- below); the paper row itself is reused rather than duplicated so the
 -- accepted/rejected history stays attached to one paper identity.
+-- The assumption ledger: what the work is standing on.
+--
+-- First-principles discipline, made checkable. Three failures in one run
+-- traced to unexamined inherited premises: a mis-cited reference reached
+-- three papers because nobody questioned it; a student contradicted his
+-- own lab's accepted results because he took his brief's framing as
+-- given; and another ground out rank-by-rank casework when his own lemmas
+-- already implied the general theorem.
+--
+-- Recording assumptions explicitly does three things prose cannot: it
+-- separates what was DERIVED from what was INHERITED, it gives the
+-- verifier tool a concrete target ("this one is finite -- check it"), and
+-- it makes a refuted assumption traceable to everything that leaned on
+-- it rather than leaving someone to grep.
+CREATE TABLE assumptions (
+    id         INTEGER PRIMARY KEY,
+    lab_id     INTEGER NOT NULL REFERENCES labs(id),
+    task_id    INTEGER REFERENCES tasks(id),
+    student_id INTEGER REFERENCES students(id),
+    statement  TEXT NOT NULL,
+    -- Where it came from. 'inherited' is the dangerous one: taken from a
+    -- brief, a root problem or a prior paper without being re-derived.
+    source     TEXT NOT NULL CHECK (source IN
+                   ('root_problem', 'brief', 'prior_paper', 'derived', 'inherited')),
+    -- 'assumed'  -- taken on faith, not yet examined
+    -- 'derived'  -- proved from definitions in this work
+    -- 'verified' -- checked computationally or against a source
+    -- 'refuted'  -- found false; everything depending on it is suspect
+    status     TEXT NOT NULL CHECK (status IN ('assumed', 'derived', 'verified', 'refuted')),
+    -- How it was settled: a tool_runs id, a reference id, a proof sketch.
+    evidence   TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_assumptions_task ON assumptions(task_id, status);
+
+
 -- Tool runs: computations and figures students produced mechanically.
 --
 -- Students reason about finite combinatorial claims ("this system has
@@ -196,7 +234,7 @@ CREATE TABLE tool_runs (
     lab_id     INTEGER NOT NULL REFERENCES labs(id),
     task_id    INTEGER REFERENCES tasks(id),
     student_id INTEGER REFERENCES students(id),
-    tool       TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch')),
+    tool       TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch', 'fetch')),
     -- The program or chart spec the student supplied, and what came back.
     input_path  TEXT NOT NULL,
     output_path TEXT NOT NULL,

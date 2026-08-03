@@ -28,6 +28,9 @@ GENERATION_KINDS = {
     "collaboration_write_paper",
     "reference_verify",
     "professor_callback",
+    "collaboration_scan",
+    "student_write_defense",
+    "propose_lab",
     "memory_compact",
 }
 

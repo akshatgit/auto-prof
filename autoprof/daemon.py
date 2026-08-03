@@ -89,6 +89,27 @@ def _provider_blocked(conn: sqlite3.Connection, provider: str) -> bool:
     return bool(check["blocked"])
 
 
+def _fail_unhandled(conn: sqlite3.Connection, job_id: int, error: Exception) -> str:
+    """Record a handler crash against the job that caused it.
+
+    The handler may have died holding a lease, or before ever claiming
+    one, so this cannot go through jobs.fail_job (which requires a
+    matching lease). It writes the terminal state directly and leaves the
+    error text for diagnosis.
+    """
+    try:
+        conn.rollback()  # discard any partial transaction the handler left
+        conn.execute(
+            "UPDATE jobs SET status='failed', attempts=attempts+1, last_error=?, "
+            "completed_at=datetime('now'), lease_id=NULL, lease_expires_at=NULL WHERE id=?",
+            (f"handler raised {type(error).__name__}: {error}"[:2000], job_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- never let cleanup kill the loop either
+        pass
+    return "failed"
+
+
 def dispatch_pending_jobs(
     conn: sqlite3.Connection,
     registry,
@@ -132,7 +153,15 @@ def dispatch_pending_jobs(
 
         handler = special_handlers.get(candidate["kind"])
         if handler is not None:
-            outcome = handler(conn, candidate["id"], backend, lab_dir)
+            # A handler that raises must fail ITS OWN job, never the loop.
+            # Without this a single unhandled exception took the daemon
+            # down and every lab stopped -- observed live, from a NOT NULL
+            # violation in one event write. runner.execute_job already had
+            # this guard; the special-handler path did not.
+            try:
+                outcome = handler(conn, candidate["id"], backend, lab_dir)
+            except Exception as e:  # noqa: BLE001 -- see above
+                outcome = _fail_unhandled(conn, candidate["id"], e)
         else:
             outcome = execute_job(conn, candidate["id"], backend, prompt_builders, lab_dir)
 

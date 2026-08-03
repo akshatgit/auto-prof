@@ -9,6 +9,7 @@ from . import (
     references_cli,
     status_cli,
     student_cli,
+    watch_cli,
     webserver_cli,
 )
 
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     lab_cli.add_subparser(subparsers)
     status_cli.add_subparser(subparsers)
     references_cli.add_subparser(subparsers)
+    watch_cli.add_subparser(subparsers)
     daemon_cli.add_subparser(subparsers)
     webserver_cli.add_subparser(subparsers)
     return parser

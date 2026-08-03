@@ -41,6 +41,15 @@ Evaluate strictly on:
    be zero. A theorem stated for "all n" that silently assumes n ≥ 2, or a
    step that divides by a difference that can vanish, is an error even
    when the main argument is sound.
+   **Ask what the argument stands on.** Are the load-bearing assumptions
+   stated, or are some inherited silently from the problem framing? A
+   result presented as unconditional that in fact depends on an
+   unexamined premise is overclaiming, even if every step is valid given
+   that premise. Where an assumption is finite and checkable, say so —
+   "this could have been settled by computation and was not" is a real
+   criticism. Conversely, a paper that *identifies* a false inherited
+   assumption and says so has done something more valuable than one that
+   quietly worked around it.
 3. **Completeness.** Are all required sections present and substantive
    (not placeholders)? A proof/disproof claim (paper §4, or a defense
    chapter) that is a sketch rather than a checkable argument should not

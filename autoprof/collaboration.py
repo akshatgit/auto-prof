@@ -510,3 +510,176 @@ def authors_for(conn: sqlite3.Connection, paper_id: int) -> list[int]:
             (paper_id,),
         )
     ]
+
+
+SCAN_PROMPT_TEMPLATE = """You are {name}, a professor. Several papers from your lab have been \
+accepted. Decide whether any of them should have been ONE paper.
+
+Your lab's root problem:
+<root_problem>
+{root_problem}
+</root_problem>
+
+Accepted papers in your lab:
+<papers>
+{papers}
+</papers>
+
+{existing}
+
+Combining is worth doing only when the papers share a subject deeply enough that together they \
+would establish something none of them establishes alone -- a unifying theorem, a resolved \
+conflict between their formulations, a result none could reach separately. Papers that merely \
+sit in the same area should stay separate.
+
+Be conservative. A collaboration costs several rounds of every author's time, and combining work \
+that does not belong together produces a worse paper than either was.
+
+Respond with ONLY a JSON object, no fences, no commentary:
+{{"combine": false, "paper_ids": [], "goal": "...", "rationale": "..."}}
+Set "combine" to true only if you are confident. "paper_ids" must name at least two accepted \
+papers from the list, and "goal" states what combining them is meant to achieve.
+"""
+
+
+def request_scan(conn: sqlite3.Connection, lab_id: int) -> int | None:
+    """Queue a scan for combinable work, unless one is already waiting."""
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE kind='collaboration_scan' AND target_id=? "
+        "AND status IN ('pending', 'running')",
+        (lab_id,),
+    ).fetchone()["n"]
+    if pending:
+        return None
+    cur = conn.execute(
+        "INSERT INTO jobs (kind, target_type, target_id, status) "
+        "VALUES ('collaboration_scan', 'lab', ?, 'pending')",
+        (lab_id,),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def execute_collaboration_scan_job(
+    conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
+) -> str:
+    """Ask the professor whether any accepted papers belong together.
+
+    Until now a collaboration could only be formed by hand: nothing
+    noticed that two accepted papers held competing lower bounds that
+    could not both be tight, and as separate papers both stood
+    indefinitely. This is the noticing.
+    """
+    lease_id = uuid.uuid4().hex
+    if not jobs.claim_job(conn, job_id, lease_id, lease_seconds=1800):
+        return "not_claimed"
+
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    lab = conn.execute("SELECT * FROM labs WHERE id = ?", (row["target_id"],)).fetchone()
+    if lab is None:
+        return jobs.fail_job(conn, job_id, lease_id, f"no lab with id={row['target_id']}")
+    professor = conn.execute(
+        "SELECT * FROM professors WHERE id = ?", (lab["professor_id"],)
+    ).fetchone()
+
+    papers = conn.execute(
+        "SELECT papers.* FROM papers JOIN tasks ON tasks.id = papers.task_id "
+        "WHERE tasks.lab_id = ? AND papers.status = 'accepted' ORDER BY papers.id",
+        (lab["id"],),
+    ).fetchall()
+    if len(papers) < 2:
+        jobs.complete_job(conn, job_id, lease_id)
+        return "done"
+
+    rendered = []
+    for paper in papers:
+        path = lab_dir / paper["path"]
+        body = path.read_text(errors="replace") if path.exists() else ""
+        rendered.append(
+            f"--- Paper {paper['id']} (student {paper['student_id']}): {paper['title']} ---\n"
+            + body[:7000]
+        )
+
+    prior = conn.execute(
+        "SELECT id, goal, status FROM collaborations WHERE lab_id = ?", (lab["id"],)
+    ).fetchall()
+    existing = (
+        "Collaborations already formed in this lab (do not propose the same combination again):\n"
+        + "\n".join(f"- #{c['id']} [{c['status']}]: {c['goal'][:120]}" for c in prior)
+        if prior
+        else "No collaborations have been formed in this lab yet."
+    )
+
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
+        SCAN_PROMPT_TEMPLATE.format(
+            name=professor["name"],
+            root_problem=lab["root_problem"],
+            papers="\n\n".join(rendered),
+            existing=existing,
+        ),
+    )
+
+    if result.rate_limited:
+        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        return "rate_limited"
+    if result.is_error:
+        return jobs.fail_job(conn, job_id, lease_id, result.error)
+
+    try:
+        payload = extract_json_object(result.text)
+    except json.JSONDecodeError as e:
+        return jobs.fail_job(
+            conn, job_id, lease_id, f"unusable scan output: {e} -- raw: {result.text[:300]}"
+        )
+
+    if bool(payload.get("combine")):
+        ids = [int(x) for x in (payload.get("paper_ids") or []) if str(x).isdigit()]
+        chosen = [p for p in papers if p["id"] in ids]
+        students = list(dict.fromkeys(p["student_id"] for p in chosen))
+        if len(students) >= 2:
+            _form_from_scan(
+                conn, lab, students, str(payload.get("goal") or "Combine these results."), lab_dir
+            )
+
+    if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
+        return "not_claimed"
+    record_job_event(
+        conn, job_id=job_id, actor_type="professor", actor_id=professor["id"],
+        event_type="collaboration_scanned", target_type="lab", target_id=lab["id"],
+    )
+    conn.commit()
+    return "done"
+
+
+def _form_from_scan(conn, lab, student_ids, goal: str, lab_dir: Path) -> int | None:
+    """Create the anchor task a collaboration needs, then form it.
+
+    A collaboration must be anchored to a task whose assigned student is
+    the lead author, so a scan-initiated one creates that task and moves
+    the lead onto it -- their previous task is finished, which is why
+    their paper was accepted in the first place.
+    """
+    from . import decompose
+
+    lead = student_ids[0]
+    task = decompose._normalize_tasks({"tasks": [{
+        "title": f"Combined result: {goal[:80]}",
+        "direction": "prove",
+        "end_criteria": (
+            "Resolved when the constituent accepted results appear as one theory with a single "
+            "unifying theorem that none established alone, in consistent notation, with any "
+            "redundant proof removed and any conflict between their formulations settled."
+        ),
+        "brief": goal,
+    }]})[0]
+    task_id = decompose._create_task(conn, lab["id"], task, lab_dir)
+    conn.execute(
+        "UPDATE students SET task_id = ?, status = 'working' WHERE id = ?", (task_id, lead)
+    )
+    try:
+        return form_collaboration(conn, task_id, student_ids, goal, lab_dir)
+    except CollaborationError:
+        return None

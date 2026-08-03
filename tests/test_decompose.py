@@ -96,7 +96,8 @@ class NormalizeTasksTests(unittest.TestCase):
             ]
         }
         self.assertEqual(
-            len(decompose._normalize_tasks(payload)), decompose.MAX_TASKS_PER_DECOMPOSITION
+            len(decompose._normalize_tasks(payload)),
+            decompose.config.max_tasks_per_decomposition(),
         )
 
     def test_normalizes_direction_case(self):

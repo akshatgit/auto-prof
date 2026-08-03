@@ -355,5 +355,115 @@ class ApplyPatchTests(unittest.TestCase):
             self.assertEqual(tools.run_apply_patch("--- a\n+++ b\n")["status"], "error")
 
 
+class FetchTests(unittest.TestCase):
+    """Internet access is allowlisted, not open: an agent that can reach
+    anything can be steered by whatever it reads."""
+
+    def test_disabled_without_an_allowlist(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = tools.run_fetch("https://example.com")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("no internet access", result["output"])
+
+    def test_host_not_on_the_allowlist_is_refused(self):
+        with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "data.gov,example.com"}):
+            result = tools.run_fetch("https://elsewhere.test/x")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("not on this lab's allowlist", result["output"])
+
+    def test_subdomains_of_an_allowed_host_are_permitted(self):
+        with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "example.com"}):
+            refused = tools.run_fetch("https://notexample.com/x")
+        self.assertIn("not on this lab", refused["output"])
+
+    def test_non_http_schemes_are_refused(self):
+        with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "example.com"}):
+            for url in ("file:///etc/passwd", "ftp://example.com/x"):
+                self.assertEqual(tools.run_fetch(url)["status"], "error")
+
+    def test_empty_url_is_refused(self):
+        with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "example.com"}):
+            self.assertEqual(tools.run_fetch("   ")["status"], "error")
+
+
+class VerifyIsolationTests(unittest.TestCase):
+    def test_verification_is_network_isolated(self):
+        """A verification that can reach the internet is not reproducible.
+        The docs promised this before the code did."""
+        if not tools._network_isolation_available():
+            self.skipTest("user namespaces unavailable on this host")
+        result = tools.run_verifier(
+            "import urllib.request\n"
+            "try:\n"
+            "    urllib.request.urlopen('https://example.com', timeout=5)\n"
+            "    print('REACHABLE')\n"
+            "except Exception as e:\n"
+            "    print('offline:', type(e).__name__)\n",
+            timeout=25,
+        )
+        self.assertNotIn("REACHABLE", result["output"])
+
+    def test_ordinary_computation_still_works_under_isolation(self):
+        result = tools.run_verifier("print('RESULT:', sum(range(100)))")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("4950", result["output"])
+
+
+class ExperimentTests(unittest.TestCase):
+    """Only a lab whose subject is this system may spawn research runs."""
+
+    def test_disabled_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = tools.run_experiment('{"idea": "x"}', lab_id=2)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("may not run experiments", result["output"])
+
+    def test_only_allowlisted_labs(self):
+        with mock.patch.dict(os.environ, {tools.EXPERIMENT_LABS_ENV: "2"}):
+            self.assertEqual(tools.run_experiment('{"idea": "x"}', lab_id=1)["status"], "error")
+
+    def test_spec_must_be_json_with_an_idea_or_measure(self):
+        with mock.patch.dict(os.environ, {tools.EXPERIMENT_LABS_ENV: "2"}):
+            self.assertEqual(tools.run_experiment("not json", lab_id=2)["status"], "error")
+            r = tools.run_experiment("{}", lab_id=2)
+            self.assertIn("needs an 'idea'", r["output"])
+
+    def test_production_paths_are_required(self):
+        env = {tools.EXPERIMENT_LABS_ENV: "2"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            result = tools.run_experiment('{"idea": "x"}', lab_id=2)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("AUTOPROF_DB_PATH", result["output"])
+
+    def test_measure_reports_only_that_lab(self):
+        """An experiment's numbers must never be contaminated by the other
+        labs sharing the database."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as d:
+            from autoprof import db as _db
+            path = Path(d) / "x.db"
+            conn = _db.connect(path)
+            _db.ensure_initialized(conn)
+            for name in ("A", "B"):
+                cur = conn.execute(
+                    "INSERT INTO professors (lab_id,name,field,status,memory_path) "
+                    "VALUES (NULL,?,'f','active','m')", (name,))
+                pid = cur.lastrowid
+                cur = conn.execute(
+                    "INSERT INTO labs (professor_id,root_problem,status) VALUES (?,?,'active')",
+                    (pid, name))
+                lab_id = cur.lastrowid
+                conn.execute("UPDATE professors SET lab_id=? WHERE id=?", (lab_id, pid))
+                conn.execute(
+                    "INSERT INTO tasks (lab_id,title,brief_path,direction,end_criteria,status) "
+                    "VALUES (?,?,'b','prove','e','open')", (lab_id, name))
+            conn.commit()
+            conn.close()
+
+            out = tools._measure(str(path), 1)
+            self.assertIn("LAB #1", out)
+            self.assertIn("tasks: open=1", out)   # not 2 -- lab 2's task excluded
+
+
 if __name__ == "__main__":
     unittest.main()

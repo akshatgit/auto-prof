@@ -8,8 +8,10 @@ from .backends.registry import default_registry
 from .daemon import SingleInstanceLock, run_daemon
 from .decompose import execute_professor_decompose_job
 from .lab_review import execute_lab_review_job
+from .callback import execute_professor_callback_job
 from .collaboration import (
     execute_collaboration_round_job,
+    execute_collaboration_scan_job,
     execute_collaboration_synthesis_job,
 )
 from .paper import (
@@ -17,6 +19,11 @@ from .paper import (
     execute_student_work_job,
     execute_student_write_paper_job,
     execute_collaboration_write_paper_job,
+)
+from .defense import (
+    execute_defense_review_job,
+    execute_propose_lab_job,
+    execute_student_write_defense_job,
 )
 from .paper_review import execute_paper_review_job
 from .references import execute_reference_verify_job
@@ -36,6 +43,11 @@ SPECIAL_HANDLERS = {
     "student_revise_paper": execute_student_revise_paper_job,
     "paper_review": execute_paper_review_job,
     "professor_supervision": execute_professor_supervision_job,
+    "professor_callback": execute_professor_callback_job,
+    "collaboration_scan": execute_collaboration_scan_job,
+    "student_write_defense": execute_student_write_defense_job,
+    "defense_review": execute_defense_review_job,
+    "propose_lab": execute_propose_lab_job,
     "collaboration_round": execute_collaboration_round_job,
     "collaboration_synthesis": execute_collaboration_synthesis_job,
     "collaboration_write_paper": execute_collaboration_write_paper_job,

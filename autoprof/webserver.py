@@ -15,6 +15,8 @@ everywhere user/model content is interpolated.
 import html
 import re
 import sqlite3
+
+from . import markdown
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -32,6 +34,19 @@ pre {{ white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; border-radi
    letting MathJax process the content. */
 .mathdoc {{ white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem;
            border-radius: 4px; line-height: 1.5; overflow-x: auto; }}
+/* Rendered Markdown: NOT pre-wrap -- the renderer emits real block
+   elements, and pre-wrap would double every paragraph break. */
+.doc {{ background: #fbfbfa; padding: 0.75rem 1rem; border-radius: 4px; line-height: 1.55; overflow-x: auto; }}
+.doc h2, .doc h3, .doc h4 {{ margin: 1rem 0 0.4rem; line-height: 1.3; }}
+.doc h2 {{ font-size: 1.1rem; }} .doc h3 {{ font-size: 1rem; }} .doc h4 {{ font-size: 0.95rem; }}
+.doc p {{ margin: 0.5rem 0; }}
+.doc ul, .doc ol {{ margin: 0.5rem 0 0.5rem 1.4rem; }}
+.doc li {{ margin: 0.25rem 0; }}
+.doc blockquote {{ margin: 0.5rem 0; padding-left: 0.8rem; border-left: 3px solid #d6d5d0; color: #52514e; }}
+.doc code {{ background: #eeeeec; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }}
+.doc pre {{ background: #f2f2f0; padding: 0.6rem; border-radius: 4px; overflow-x: auto; }}
+.doc pre code {{ background: none; padding: 0; }}
+.doc hr {{ border: 0; border-top: 1px solid #ddd; margin: 1rem 0; }}
 </style>
 <script>
   // Root problems and task briefs are written in LaTeX. Without this they
@@ -304,7 +319,7 @@ def render_review_rationale(conn: sqlite3.Connection, review_id: int, lab_dir) -
         f"<h1>Review: {_e(review['target_type'])} #{review['target_id']}</h1>"
         f"<p>round {review['review_round']} &mdash; reviewer #{review['reviewer_index']} "
         f"&mdash; verdict: <span class='status'>{_e(review['verdict'])}</span></p>"
-        f"<div class='mathdoc'>{_e(text)}</div>"
+        f"<div class='doc'>{markdown.render(text)}</div>"
     )
     return _PAGE.format(title=f"autoprof — review #{review['id']}", body=body)
 

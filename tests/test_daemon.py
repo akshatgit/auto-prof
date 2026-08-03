@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -317,6 +318,63 @@ class DispatchOrderingTests(unittest.TestCase):
 
         self.assertEqual(dispatched, [newer_fresh])
         self.assertNotIn(old_failing, dispatched)
+        conn.close()
+
+
+class HandlerCrashTests(unittest.TestCase):
+    """One handler raising must not stop the daemon -- it did once, and
+    every lab halted until a human noticed."""
+
+    class _Reg:
+        def get_backend(self, kind):
+            return SimpleNamespace(name="fake")
+
+    def _job(self, conn, ids):
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_work', 'task', ?, 'pending')",
+            (ids["task_id"],),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def test_crash_fails_the_job_not_the_loop(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = self._job(conn, ids)
+
+        def exploding(conn_, job, backend, lab_dir):
+            raise sqlite3.IntegrityError("NOT NULL constraint failed: events.target_id")
+
+        dispatched = daemon.dispatch_pending_jobs(
+            conn, self._Reg(), {}, Path("/tmp"), budget_cap=2,
+            special_handlers={"student_work": exploding},
+        )
+
+        self.assertEqual(dispatched, 1)  # the loop kept going
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("IntegrityError", row["last_error"])
+        conn.close()
+
+    def test_later_jobs_still_run_after_an_earlier_crash(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        first = self._job(conn, ids)
+        second = self._job(conn, ids)
+        seen = []
+
+        def handler(conn_, job, backend, lab_dir):
+            if job == first:
+                raise RuntimeError("boom")
+            seen.append(job)
+            return "done"
+
+        daemon.dispatch_pending_jobs(
+            conn, self._Reg(), {}, Path("/tmp"), budget_cap=5,
+            special_handlers={"student_work": handler},
+        )
+        self.assertEqual(seen, [second])
         conn.close()
 
 

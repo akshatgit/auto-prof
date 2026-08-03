@@ -17,7 +17,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import config, db, jobs, references
+from . import callback, collaboration, config, db, jobs, references
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -226,7 +226,31 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         # Enrol in the shared reference bank so later students -- and
         # later labs -- can cite this result as established work.
         references.register_accepted_paper(conn, paper_id)
-    elif _accepted_paper_count(conn, paper["task_id"]) < config.max_accepted_papers():
+        # Hand the task to the professor (§3.3): an accepted paper does
+        # not by itself mean the task's question is settled.
+        callback.request_callback(conn, paper["task_id"])
+        # And ask whether this result belongs with earlier accepted work
+        # (§ collaboration): nothing used to notice that two papers held
+        # competing results that could not both be tight.
+        task_row = conn.execute(
+            "SELECT lab_id FROM tasks WHERE id = ?", (paper["task_id"],)
+        ).fetchone()
+        if task_row:
+            collaboration.request_scan(conn, task_row["lab_id"])
+    elif _accepted_paper_count(conn, paper["task_id"]) >= config.max_accepted_papers():
+        # The lab has what it needs; the revise loop stops here and the
+        # professor decides what becomes of the task (§3.3). Without this
+        # a rejected paper past the target was simply a dead end.
+        callback.request_callback(conn, paper["task_id"])
+        # And ask whether this result belongs with earlier accepted work
+        # (§ collaboration): nothing used to notice that two papers held
+        # competing results that could not both be tight.
+        task_row = conn.execute(
+            "SELECT lab_id FROM tasks WHERE id = ?", (paper["task_id"],)
+        ).fetchone()
+        if task_row:
+            collaboration.request_scan(conn, task_row["lab_id"])
+    else:
         # Revise-and-resubmit (§3.2 step 4). Without this a rejected paper
         # is a dead end -- the same gap `lab revise` closed for labs. The
         # loop keeps going until the lab reaches its accepted-paper target;

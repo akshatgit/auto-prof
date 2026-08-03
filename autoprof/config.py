@@ -20,6 +20,12 @@ from . import db
 # the latter is what a lab exists to produce.
 DEFAULT_MAX_ACCEPTED_PAPERS = 4
 
+# How many tasks a professor may open in one decomposition. Each costs a
+# student and a full chain of model calls, so the default keeps a lab on a
+# workable front; a lab that genuinely spans several independent problems
+# raises it.
+DEFAULT_MAX_TASKS_PER_DECOMPOSITION = 4
+
 # Ceiling on student<->professor supervision meetings for one task. This is
 # a termination guarantee, not a target: the loop is meant to run until the
 # professor agrees the work is ready, however many passes that takes, and
@@ -113,3 +119,22 @@ def max_collaboration_rounds(config_path: Path | None = None, env: dict | None =
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_COLLABORATION_ROUNDS
+
+
+def max_tasks_per_decomposition(config_path: Path | None = None, env: dict | None = None) -> int:
+    """Tasks opened per decomposition. See
+    DEFAULT_MAX_TASKS_PER_DECOMPOSITION for why this is capped at all."""
+    env = env if env is not None else os.environ
+    raw = env.get("AUTOPROF_MAX_TASKS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_tasks_per_decomposition")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_TASKS_PER_DECOMPOSITION

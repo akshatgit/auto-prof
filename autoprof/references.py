@@ -441,6 +441,7 @@ def execute_reference_verify_job(conn, job_id: int, backend, lab_dir) -> str:
     if not jobs.claim_job(conn, job_id, lease_id, lease_seconds=1800):
         return "not_claimed"
 
+    job_row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     rows = pending_verification(conn)
     if not rows:
         jobs.complete_job(conn, job_id, lease_id)
@@ -480,7 +481,7 @@ def execute_reference_verify_job(conn, job_id: int, backend, lab_dir) -> str:
         actor_id=None,
         event_type="references_verified",
         target_type="lab",
-        target_id=None,
+        target_id=job_row["target_id"],
     )
     conn.commit()
     return "done"

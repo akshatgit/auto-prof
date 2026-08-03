@@ -18,17 +18,16 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import ingest, jobs
+from . import config, ingest, jobs
 from .artifacts import checkpoint_artifact, write_artifact
 from .backends.base import Backend
 from .events import record_job_event
 from .jsonio import extract_json_object
 
-# Cap on tasks created per decomposition. A professor asked for "an
-# initial set of tasks" will sometimes return 20; each one costs a student
-# and a chain of model calls, so the lab opens on a workable front and
-# decomposes further via professor_callback later.
-MAX_TASKS_PER_DECOMPOSITION = 4
+# The per-decomposition task cap now lives in autoprof/config.py so a lab
+# spanning several independent problems can raise it. Kept as an alias for
+# callers and tests that referenced it directly.
+MAX_TASKS_PER_DECOMPOSITION = config.DEFAULT_MAX_TASKS_PER_DECOMPOSITION
 
 VALID_DIRECTIONS = ("prove", "disprove", "open")
 
@@ -89,19 +88,21 @@ class DecomposeError(RuntimeError):
     pass
 
 
-def _normalize_tasks(payload: dict) -> list[dict]:
+def _normalize_tasks(payload: dict, max_tasks: int | None = None) -> list[dict]:
     """Validate the model's task list before any of it reaches the DB.
 
     Rejects rather than repairs: a task with a direction the schema won't
     accept, or with no end criteria, is a decomposition the professor
     should redo (the job retries), not one to silently patch up.
     """
+    if max_tasks is None:
+        max_tasks = config.max_tasks_per_decomposition()
     raw_tasks = payload.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise DecomposeError(f"decomposition contained no tasks: {payload!r}")
 
     tasks = []
-    for i, task in enumerate(raw_tasks[:MAX_TASKS_PER_DECOMPOSITION]):
+    for i, task in enumerate(raw_tasks[:max_tasks]):
         if not isinstance(task, dict):
             raise DecomposeError(f"task {i} is not an object: {task!r}")
         missing = {"title", "direction", "end_criteria"} - task.keys()
@@ -221,7 +222,7 @@ def execute_professor_decompose_job(
             name=professor["name"],
             field=professor["field"],
             root_problem=lab["root_problem"],
-            max_tasks=MAX_TASKS_PER_DECOMPOSITION,
+            max_tasks=config.max_tasks_per_decomposition(),
             corpus=ingest.render_corpus(conn, lab['id'], lab_dir),
         )
     )

@@ -58,13 +58,34 @@ _ADDITIVE_TABLES = (
         "CREATE INDEX idx_supervisions_task ON supervisions(task_id, round)",
     ),
     (
+        "assumptions",
+        """CREATE TABLE assumptions (
+            id         INTEGER PRIMARY KEY,
+            lab_id     INTEGER NOT NULL REFERENCES labs(id),
+            task_id    INTEGER REFERENCES tasks(id),
+            student_id INTEGER REFERENCES students(id),
+            statement  TEXT NOT NULL,
+            source     TEXT NOT NULL CHECK (source IN
+                           ('root_problem', 'brief', 'prior_paper', 'derived', 'inherited')),
+            status     TEXT NOT NULL CHECK (status IN
+                           ('assumed', 'derived', 'verified', 'refuted')),
+            evidence   TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+    ),
+    (
+        "idx_assumptions_task",
+        "CREATE INDEX idx_assumptions_task ON assumptions(task_id, status)",
+    ),
+    (
         "tool_runs",
         """CREATE TABLE tool_runs (
             id          INTEGER PRIMARY KEY,
             lab_id      INTEGER NOT NULL REFERENCES labs(id),
             task_id     INTEGER REFERENCES tasks(id),
             student_id  INTEGER REFERENCES students(id),
-            tool        TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch')),
+            tool        TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch', 'fetch')),
             input_path  TEXT NOT NULL,
             output_path TEXT NOT NULL,
             status      TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
