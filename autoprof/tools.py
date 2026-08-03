@@ -58,7 +58,8 @@ SERIES_COLOURS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
 SERIES_DASHES = ("", "6 3", "2 3", "8 3 2 3")
 
 _TOOL_BLOCK_RE = re.compile(
-    r"```tool:(verify|visualize|readfile|propose_patch|apply_patch|fetch|experiment)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
+    r"```tool:(verify|visualize|readfile|propose_patch|apply_patch|fetch|experiment|record)"
+    r"\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
 )
 
 # Where `readfile` and `propose_patch` are allowed to look. Set per lab by
@@ -136,6 +137,16 @@ Design experiments properly: vary ONE thing between arms, state the arms before 
 ```tool:readfile
 autoprof/daemon.py
 ```
+
+**record** -- query THIS system's own operational record: what the installation actually did, not what its source code says it should do. One slice name per call.
+
+Slices: `labs`, `papers`, `verdicts`, `jobs`, `failures`, `supervision`, `tools`, `assumptions`, `events`.
+
+```tool:record
+verdicts
+```
+
+This is your evidence base. A claim about how this system behaves must cite the record, not the code -- "reviewers of different model families disagree at rate X" is a measurement, whereas "reviewers are independent" is a design intention. Where the record contradicts the design, the record wins and that contradiction is a finding worth reporting.
 
 **propose_patch** -- propose a change WITHOUT applying it. Supply a unified diff (`diff -u`). It is recorded as an artifact for a human to review. Use this when a change is too large or too risky to land automatically.
 
@@ -438,6 +449,118 @@ def _measure(db_path: str, lab_id: int) -> str:
         return f"(lab #{lab_id} could not be measured: {e})"
     finally:
         conn.close()
+
+
+
+# Which slices of the operational record are queryable. A fixed menu
+# rather than free SQL: the record is evidence for claims about this
+# system, and evidence a student can compose its own query for is
+# evidence a student can shape to fit the claim it already wants.
+RECORD_QUERIES = {
+    "labs": (
+        "Every lab, its status and how many review rounds it needed.",
+        "SELECT l.id, l.status, l.current_review_round AS review_rounds, "
+        "(SELECT COUNT(*) FROM tasks t WHERE t.lab_id=l.id) AS tasks, "
+        "substr(l.root_problem, 1, 120) AS root_problem "
+        "FROM labs l ORDER BY l.id",
+    ),
+    "papers": (
+        "Every paper, its status, and how many review rounds it took.",
+        "SELECT p.id, p.status, p.review_round, t.lab_id, substr(p.title,1,90) AS title "
+        "FROM papers p LEFT JOIN tasks t ON t.id = p.task_id ORDER BY p.id",
+    ),
+    "verdicts": (
+        "Review verdicts broken down by target type, round and REVIEWER BACKEND -- "
+        "the cross-family disagreement data.",
+        "SELECT target_type, reviewer_backend, verdict, COUNT(*) AS n FROM reviews "
+        "GROUP BY target_type, reviewer_backend, verdict ORDER BY target_type, n DESC",
+    ),
+    "jobs": (
+        "Job outcomes by kind: how much work each stage took and how often it failed.",
+        "SELECT kind, status, COUNT(*) AS n, SUM(attempts) AS total_attempts "
+        "FROM jobs GROUP BY kind, status ORDER BY n DESC",
+    ),
+    "failures": (
+        "Jobs that failed terminally, with the recorded reason.",
+        "SELECT id, kind, target_type, target_id, attempts, substr(last_error,1,200) AS last_error "
+        "FROM jobs WHERE status='failed' ORDER BY id",
+    ),
+    "supervision": (
+        "Supervision meetings per task and the verdicts reached -- the long-horizon record.",
+        "SELECT task_id, COUNT(*) AS meetings, "
+        "SUM(verdict='continue') AS continued, SUM(verdict='ready') AS ready, "
+        "SUM(verdict='abandon') AS abandoned FROM supervisions GROUP BY task_id ORDER BY task_id",
+    ),
+    "tools": (
+        "Tool usage and success rate, by tool.",
+        "SELECT tool, status, COUNT(*) AS n FROM tool_runs GROUP BY tool, status ORDER BY tool",
+    ),
+    "assumptions": (
+        "The assumption ledger across all labs, by status.",
+        "SELECT status, source, COUNT(*) AS n FROM assumptions GROUP BY status, source",
+    ),
+    "events": (
+        "Notable lifecycle events in order.",
+        "SELECT event_type, COUNT(*) AS n FROM events GROUP BY event_type ORDER BY n DESC",
+    ),
+}
+
+RECORD_ROW_LIMIT = 200
+
+
+def run_record(body: str, db_path: str | None = None) -> dict:
+    """Query this system's own operational record.
+
+    The meta-lab's subject is the system it runs inside, so its evidence
+    is not a literature search -- it is what this installation actually
+    did: which labs stalled, how many rounds papers needed, where
+    reviewers of different families disagreed, what failed and why.
+    Without this the lab can only reason ABOUT the system from its source
+    code, which is how you get a paper describing intended behaviour
+    rather than observed behaviour.
+
+    Read-only and a FIXED menu of queries. Free-form SQL would let a
+    student compose exactly the query that supports the claim it has
+    already written, which is the same defect as a p-hacked analysis.
+    """
+    import os
+    import sqlite3
+
+    name = (body or "").strip().splitlines()[0].strip().lower() if (body or "").strip() else ""
+    if name not in RECORD_QUERIES:
+        menu = "\n".join(f"  {key} -- {desc}" for key, (desc, _) in RECORD_QUERIES.items())
+        return {
+            "status": "error",
+            "output": f"(unknown slice {name!r}. Available:\n{menu})",
+        }
+
+    path = db_path or os.environ.get("AUTOPROF_DB_PATH")
+    if not path:
+        return {"status": "error", "output": "(no database configured; set AUTOPROF_DB_PATH)"}
+
+    _, sql = RECORD_QUERIES[name]
+    try:
+        # Read-only connection: the record must not be editable by the
+        # lab whose claims rest on it.
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(sql).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return {"status": "error", "output": f"(could not read the record: {e})"}
+
+    if not rows:
+        return {"status": "ok", "output": f"{name}: (no rows)"}
+
+    headers = list(rows[0].keys())
+    lines = [" | ".join(headers), "-" * 60]
+    for row in rows[:RECORD_ROW_LIMIT]:
+        lines.append(" | ".join("" if row[h] is None else str(row[h]) for h in headers))
+    if len(rows) > RECORD_ROW_LIMIT:
+        lines.append(f"... {len(rows) - RECORD_ROW_LIMIT} more rows")
+    return {"status": "ok", "output": "\n".join(lines)}
 
 
 def run_propose_patch(body: str) -> dict:
@@ -852,6 +975,8 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
             result = run_fetch(body)
         elif tool == "experiment":
             result = run_experiment(body, lab_id)
+        elif tool == "record":
+            result = run_record(body)
         elif tool == "propose_patch":
             result = run_propose_patch(body)
         else:

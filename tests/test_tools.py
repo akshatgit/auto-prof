@@ -467,3 +467,69 @@ class ExperimentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordToolTests(unittest.TestCase):
+    """The meta-lab's evidence is what this installation DID, not what its
+    source says it should do."""
+
+    def _db(self):
+        import sqlite3
+        from autoprof import db as db_module
+        path = Path(tempfile.mkdtemp()) / "rec.db"
+        conn = db_module.connect(path)
+        db_module.ensure_initialized(conn)
+        cur = conn.execute(
+            "INSERT INTO professors (lab_id, name, field, status, memory_path) "
+            "VALUES (NULL, 'P', 'F', 'active', 'm.md')"
+        )
+        conn.execute(
+            "INSERT INTO labs (professor_id, root_problem, status) VALUES (?, 'rp', 'active')",
+            (cur.lastrowid,),
+        )
+        conn.commit()
+        conn.close()
+        return str(path)
+
+    def test_returns_rows_for_a_known_slice(self):
+        out = tools.run_record("labs", db_path=self._db())
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("root_problem", out["output"])
+
+    def test_an_unknown_slice_lists_the_menu(self):
+        out = tools.run_record("whatever", db_path=self._db())
+        self.assertEqual(out["status"], "error")
+        self.assertIn("verdicts", out["output"])
+
+    def test_free_form_sql_is_not_accepted(self):
+        """A student that can write its own query can write the one that
+        supports the claim it already made."""
+        out = tools.run_record("SELECT * FROM labs", db_path=self._db())
+        self.assertEqual(out["status"], "error")
+
+    def test_the_record_cannot_be_written_to(self):
+        path = self._db()
+        tools.RECORD_QUERIES["_probe"] = ("t", "DELETE FROM labs")
+        try:
+            out = tools.run_record("_probe", db_path=path)
+        finally:
+            del tools.RECORD_QUERIES["_probe"]
+        self.assertEqual(out["status"], "error")
+        self.assertIn("readonly", out["output"].lower())
+
+    def test_missing_database_is_reported_not_raised(self):
+        import os
+        saved = os.environ.pop("AUTOPROF_DB_PATH", None)
+        try:
+            out = tools.run_record("labs")
+            self.assertEqual(out["status"], "error")
+        finally:
+            if saved:
+                os.environ["AUTOPROF_DB_PATH"] = saved
+
+    def test_the_tool_block_is_recognised(self):
+        calls = tools.parse_tool_calls("```tool:record\nverdicts\n```")
+        self.assertEqual(calls, [("record", "verdicts\n")])
+
+    def test_docs_tell_the_student_the_record_beats_the_design(self):
+        self.assertIn("the record wins", tools.TOOL_DOCS)
