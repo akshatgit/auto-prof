@@ -71,6 +71,28 @@ def _looks_token_exhausted(text: str) -> bool:
     return any(marker in lowered for marker in _TOKEN_EXHAUSTION_MARKERS)
 
 
+def parse_final_message(stdout: str) -> str:
+    """Extract the agent's last message from `codex exec --json` output.
+
+    The stream carries one JSON object per line; the answer arrives as
+    `{"type":"item.completed","item":{"type":"agent_message","text":...}}`.
+    Takes the LAST such item, since a run may emit several.
+    """
+    latest = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") or {}
+        if item.get("type") == "agent_message" and item.get("text"):
+            latest = item["text"]
+    return latest
+
+
 def parse_session_id(stdout: str) -> str | None:
     """Pull the thread id out of `codex exec --json`'s JSONL event stream.
 
@@ -114,21 +136,18 @@ class CodexBackend(Backend):
             out_path = Path(tmp_dir) / "codex_output.txt"
             resume_session_id = opts.get("resume_session_id")
 
+            # `codex exec resume` accepts a NARROWER flag set than `codex
+            # exec` -- notably neither --sandbox nor -o. Assuming parity
+            # made every resume fail with "unexpected argument", which
+            # mocked tests could not catch because they validated the
+            # command we intended rather than one Codex accepts.
+            resuming = bool(resume_session_id)
             cmd = ["codex", "exec"]
-            if resume_session_id:
-                # `codex exec resume <id> <prompt>` continues the existing
-                # thread, so a retry after token exhaustion picks up the
-                # derivation instead of starting from nothing.
+            if resuming:
                 cmd += ["resume", resume_session_id]
-            cmd += [
-                "--skip-git-repo-check",
-                "--sandbox", opts.get("sandbox", self.sandbox),
-                # --json makes stdout a JSONL event stream whose first
-                # event carries thread_id; -o still captures the final
-                # message, so we get both the id and the answer.
-                "--json",
-                "-o", str(out_path),
-            ]
+            cmd += ["--skip-git-repo-check", "--json"]
+            if not resuming:
+                cmd += ["--sandbox", opts.get("sandbox", self.sandbox), "-o", str(out_path)]
             model = opts.get("model", self.model)
             if model:
                 cmd += ["--model", model]
@@ -185,7 +204,12 @@ class CodexBackend(Backend):
                     session_id=session_id,
                 )
 
+            # On a resume there is no -o file, so the answer comes from the
+            # event stream. Fall back to it on a fresh run too: an empty
+            # -o file with a well-formed stream is recoverable.
             text = out_path.read_text() if out_path.exists() else ""
+            if not text.strip():
+                text = parse_final_message(proc.stdout or "")
 
             # A zero exit with no output is a failure, not an empty
             # success. `codex exec` writes its answer to the -o file at the

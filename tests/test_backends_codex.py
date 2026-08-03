@@ -4,6 +4,7 @@ import subprocess
 import unittest
 from types import SimpleNamespace
 
+from autoprof.backends import codex as codex_module
 from autoprof.backends.codex import CodexBackend, parse_session_id
 
 
@@ -265,6 +266,75 @@ class EmptyOutputTests(unittest.TestCase):
         result = CodexBackend(runner=fake_runner_writing_output("actual answer")).run("hi")
         self.assertFalse(result.is_error)
         self.assertEqual(result.text, "actual answer")
+
+
+class ResumeFlagCompatibilityTests(unittest.TestCase):
+    """`codex exec resume` accepts a NARROWER flag set than `codex exec`.
+    Assuming parity made every resume fail with "unexpected argument",
+    and mocked tests could not catch it because they validated the command
+    we intended rather than one Codex accepts."""
+
+    def _capture(self, **run_kwargs):
+        captured = {}
+
+        def fake_runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"type":"thread.started","thread_id":"t1"}\n'
+                       '{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}',
+                stderr="",
+            )
+
+        CodexBackend(runner=fake_runner).run("prompt", **run_kwargs)
+        return captured["cmd"]
+
+    def test_resume_omits_sandbox_and_output_file(self):
+        cmd = self._capture(resume_session_id="abc-123")
+        self.assertEqual(cmd[:4], ["codex", "exec", "resume", "abc-123"])
+        self.assertNotIn("--sandbox", cmd)
+        self.assertNotIn("-o", cmd)
+
+    def test_fresh_run_still_uses_sandbox_and_output_file(self):
+        cmd = self._capture()
+        self.assertIn("--sandbox", cmd)
+        self.assertIn("-o", cmd)
+
+    def test_both_forms_request_the_json_stream(self):
+        self.assertIn("--json", self._capture())
+        self.assertIn("--json", self._capture(resume_session_id="abc-123"))
+
+
+class FinalMessageParsingTests(unittest.TestCase):
+    """A resumed run has no -o file, so the answer comes from the stream."""
+
+    def test_takes_the_last_agent_message(self):
+        stream = (
+            '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"final"}}\n'
+        )
+        self.assertEqual(codex_module.parse_final_message(stream), "final")
+
+    def test_ignores_non_message_events_and_noise(self):
+        stream = (
+            "Reading additional input...\n"
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"turn.completed","usage":{}}\n'
+        )
+        self.assertEqual(codex_module.parse_final_message(stream), "")
+
+    def test_resumed_run_returns_stream_text_as_the_result(self):
+        def fake_runner(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"type":"thread.started","thread_id":"t1"}\n'
+                       '{"type":"item.completed","item":{"type":"agent_message","text":"resumed answer"}}',
+                stderr="",
+            )
+
+        result = CodexBackend(runner=fake_runner).run("p", resume_session_id="t1")
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.text, "resumed answer")
 
 
 if __name__ == "__main__":
