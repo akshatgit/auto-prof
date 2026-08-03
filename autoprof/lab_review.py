@@ -21,6 +21,11 @@ from .events import record_job_event
 REVIEWER_COUNT = 3
 STRONG_ACCEPT_THRESHOLD = 2
 
+# How many failed review rounds before the lab stops revising and waits
+# for a human. Not a quality judgement -- a stop condition on a loop that
+# had none.
+MAX_REVIEW_ROUNDS = 4
+
 _LAB_REVIEW_RUBRIC_PATH = db.REPO_ROOT / "templates" / "lab_review_rubric.md"
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(\w+)\s*$", re.MULTILINE)
 
@@ -202,6 +207,19 @@ def _maybe_finalize(conn: sqlite3.Connection, lab_id: int, review_round: int, jo
             (lab["professor_id"],),
         )
         event_type = "lab_review_passed"
+    elif review_round >= MAX_REVIEW_ROUNDS:
+        # The revise->review cycle is otherwise UNBOUNDED, and each turn
+        # costs 3 reviews plus a revision. Lab #3 burned 12 reviews and 2
+        # revisions oscillating around the bar -- 2-of-3 accept but only
+        # one strong_accept -- with no mechanism that could ever stop it.
+        #
+        # Stopping here rather than revising again is the point: a problem
+        # statement that four independent panels declined to endorse is
+        # not one more rewrite away from passing, and quota spent looping
+        # is quota not spent on labs doing research. The lab stays in
+        # pending_review so nothing is lost; a human decides whether to
+        # push it through, rewrite the root problem, or drop it.
+        event_type = "lab_review_exhausted"
     else:
         event_type = "lab_review_failed"
         # Without this the lab sits in pending_review with nothing queued

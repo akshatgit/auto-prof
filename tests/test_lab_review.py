@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autoprof import lab_review
+from autoprof import lab_review, watch_cli
 from autoprof.backends.base import Backend, BackendResult
 from tests.helpers import fresh_db
 
@@ -324,6 +324,91 @@ class AutoRevisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ids = self._fail_a_round(conn, Path(d))
         self.assertIsNone(lab_review.request_lab_revision(conn, ids["lab_id"]))
+        conn.close()
+
+
+class ReviseLoopCapTests(unittest.TestCase):
+    """The revise->review cycle had no stop condition. Each turn costs 3
+    reviews plus a revision, and lab #3 burned 12 reviews oscillating just
+    under the bar with nothing that could ever halt it."""
+
+    def _job(self, conn, lab_id):
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('lab_review', 'lab', ?, 'done')", (lab_id,)
+        )
+        conn.commit()
+        return cur.lastrowid
+
+    def _fail_round(self, conn, lab_id, round_):
+        conn.execute("UPDATE labs SET current_review_round=? WHERE id=?", (round_, lab_id))
+        for index in (1, 2, 3):
+            conn.execute(
+                "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, "
+                "verdict, rationale_path) VALUES ('lab', ?, ?, ?, 'weak_accept', 'r.md')",
+                (lab_id, round_, index),
+            )
+        conn.commit()
+        lab_review._maybe_finalize(conn, lab_id, round_, self._job(conn, lab_id))
+
+    def test_an_early_failure_still_queues_a_revision(self):
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        self._fail_round(conn, lab_id, 1)
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE kind='lab_revise' AND target_id=?", (lab_id,)
+        ).fetchone()[0]
+        self.assertEqual(pending, 1)
+        conn.close()
+
+    def test_the_loop_stops_at_the_cap(self):
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        self._fail_round(conn, lab_id, lab_review.MAX_REVIEW_ROUNDS)
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE kind='lab_revise' AND target_id=?", (lab_id,)
+        ).fetchone()[0]
+        self.assertEqual(queued, 0)
+        conn.close()
+
+    def test_exhaustion_is_announced_so_a_human_sees_it(self):
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        self._fail_round(conn, lab_id, lab_review.MAX_REVIEW_ROUNDS)
+        kinds = [
+            r["event_type"] for r in conn.execute(
+                "SELECT event_type FROM events WHERE target_type='lab' AND target_id=?", (lab_id,)
+            )
+        ]
+        self.assertIn("lab_review_exhausted", kinds)
+        self.assertIn("lab_review_exhausted", watch_cli.NOTABLE_EVENT_TYPES)
+        conn.close()
+
+    def test_the_lab_is_not_destroyed_just_paused(self):
+        """Nothing is lost -- a human may still push it through."""
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        self._fail_round(conn, lab_id, lab_review.MAX_REVIEW_ROUNDS)
+        status = conn.execute("SELECT status FROM labs WHERE id=?", (lab_id,)).fetchone()[0]
+        self.assertEqual(status, "pending_review")
+        conn.close()
+
+    def test_passing_at_the_cap_round_still_activates(self):
+        """The cap must gate revision, never acceptance."""
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        round_ = lab_review.MAX_REVIEW_ROUNDS
+        conn.execute("UPDATE labs SET current_review_round=? WHERE id=?", (round_, lab_id))
+        for index in (1, 2, 3):
+            conn.execute(
+                "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, "
+                "verdict, rationale_path) VALUES ('lab', ?, ?, ?, 'strong_accept', 'r.md')",
+                (lab_id, round_, index),
+            )
+        conn.commit()
+        lab_review._maybe_finalize(conn, lab_id, round_, self._job(conn, lab_id))
+        status = conn.execute("SELECT status FROM labs WHERE id=?", (lab_id,)).fetchone()[0]
+        self.assertEqual(status, "active")
         conn.close()
 
 

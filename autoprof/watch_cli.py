@@ -33,6 +33,10 @@ NOTABLE_EVENT_TYPES = {
     "defense_failed": "a student failed their defense",
     "paper_accepted": "a paper was ACCEPTED",
     "lab_review_passed": "a lab passed review and is now active",
+    "lab_review_exhausted": (
+        "NEEDS YOU: a lab failed review 4 times and has stopped revising -- "
+        "push it through, rewrite the root problem, or drop it"
+    ),
     "task_resolved": "the professor closed a task as resolved",
     "task_abandoned": "the professor abandoned a task",
     "collaboration_ready": "a collaboration converged and is writing a joint paper",
