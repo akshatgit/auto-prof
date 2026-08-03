@@ -46,6 +46,67 @@ class BuildPromptTests(unittest.TestCase):
         # section or a proof yet.
         self.assertNotIn("Related Work", prompt)
 
+    def test_no_seed_idea_omits_the_fidelity_block(self):
+        # Labs predating labs.seed_idea have nothing to judge fidelity
+        # against; an empty <seed_idea> block would invite the reviewer to
+        # compare the statement to nothing.
+        prompt = lab_review._build_prompt("is X true?", None)
+        self.assertNotIn("<seed_idea>", prompt)
+
+    def test_seed_idea_is_shown_to_the_reviewer(self):
+        prompt = lab_review._build_prompt("is X true?", "make the system commit its own fixes")
+        self.assertIn("make the system commit its own fixes", prompt)
+        self.assertIn("<seed_idea>", prompt)
+        self.assertIn("Fidelity", prompt)
+
+
+class ReviseKeepsTheSeedIdeaTests(unittest.TestCase):
+    """The revise->review loop is where drift happens: round 1 is anchored
+    to the human's idea by the soul prompt, but every later round only ever
+    saw the PREVIOUS root problem plus reviewer critique. The seed has to
+    reach the reviser or the anchor is lost after round 1."""
+
+    def _fail_a_round(self, conn, lab_dir, seed_idea=None):
+        ids = _seed_lab(conn)
+        if seed_idea is not None:
+            conn.execute(
+                "UPDATE labs SET seed_idea = ? WHERE id = ?", (seed_idea, ids["lab_id"])
+            )
+            conn.commit()
+        job_ids = lab_review.request_lab_review(conn, ids["lab_id"])
+        backend = ScriptedBackend([BackendResult(text="rationale\nVERDICT: accept")] * 3)
+        for job_id in job_ids:
+            lab_review.execute_lab_review_job(conn, job_id, backend, lab_dir)
+        return ids
+
+    def test_revise_prompt_carries_the_seed_idea(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            self._fail_a_round(conn, lab_dir, seed_idea="make the system commit its own fixes")
+            job_id = conn.execute("SELECT id FROM jobs WHERE kind='lab_revise'").fetchone()["id"]
+            backend = ScriptedBackend([BackendResult(text="a sharper root problem " * 40)])
+            lab_review.execute_lab_revise_job(conn, job_id, backend, lab_dir)
+
+        self.assertIn("make the system commit its own fixes", backend.calls[0])
+        self.assertIn("<seed_idea>", backend.calls[0])
+        conn.close()
+
+    def test_revise_prompt_without_a_seed_idea_still_renders(self):
+        # The placeholder must collapse cleanly, not leave a literal
+        # "{seed_idea_block}" in the prompt actually sent to the model.
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            self._fail_a_round(conn, lab_dir)
+            job_id = conn.execute("SELECT id FROM jobs WHERE kind='lab_revise'").fetchone()["id"]
+            backend = ScriptedBackend([BackendResult(text="a sharper root problem " * 40)])
+            lab_review.execute_lab_revise_job(conn, job_id, backend, lab_dir)
+
+        self.assertNotIn("seed_idea_block", backend.calls[0])
+        self.assertNotIn("<seed_idea>", backend.calls[0])
+        conn.close()
+
 
 class RequestLabReviewTests(unittest.TestCase):
     def test_creates_three_jobs_for_round_1(self):

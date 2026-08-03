@@ -30,6 +30,12 @@ CREATE TABLE labs (
     -- `reviews` rows for lab targets can be validated against the
     -- current round the same way paper/defense reviews already are.
     current_review_round  INTEGER NOT NULL DEFAULT 1 CHECK (current_review_round >= 1),
+    -- The human's raw idea as given to `create-prof`, verbatim. The root
+    -- problem above is a MODEL's formalization of it and is rewritten on
+    -- every failed review round; this column is the fixed point those
+    -- rewrites are judged against, so a lab cannot be revised away from
+    -- what was actually asked for. NULL for labs predating the column.
+    seed_idea             TEXT,
     created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

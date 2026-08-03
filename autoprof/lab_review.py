@@ -37,7 +37,21 @@ class LabReviewError(RuntimeError):
 _LEADING_HTML_COMMENT_RE = re.compile(r"^\s*<!--.*?-->\s*\n", re.DOTALL)
 
 
-def _build_prompt(root_problem: str) -> str:
+_SEED_IDEA_BLOCK = """
+The human who commissioned this lab described what they wanted in their
+own words, below. The problem statement under review is a model's
+formalization of it, possibly after several rounds of revision. Judge
+fidelity against THIS, not against the statement's internal coherence --
+a statement can be rigorous, well-posed and still be about the wrong
+subject.
+
+<seed_idea>
+{seed_idea}
+</seed_idea>
+"""
+
+
+def _build_prompt(root_problem: str, seed_idea: str | None = None) -> str:
     # Deliberately NOT templates/review_rubric.md -- that rubric evaluates
     # a completed paper/defense (proof present, Related Work present) and
     # was tried here first; it systematically rejects a bare problem
@@ -48,7 +62,12 @@ def _build_prompt(root_problem: str) -> str:
     # future editors of this file, not an instruction for the reviewer,
     # and shouldn't be sent as part of the actual prompt.
     template = _LEADING_HTML_COMMENT_RE.sub("", template, count=1)
-    return template.format(ROOT_PROBLEM=root_problem)
+    # Labs created before labs.seed_idea existed have no idea on record.
+    # Rendering an empty block would invite the reviewer to judge fidelity
+    # against nothing; omitting it falls back to the original behaviour of
+    # judging the statement on its own terms.
+    block = _SEED_IDEA_BLOCK.format(seed_idea=seed_idea.strip()) if seed_idea else ""
+    return template.format(ROOT_PROBLEM=root_problem, SEED_IDEA_BLOCK=block)
 
 
 def request_lab_review(conn: sqlite3.Connection, lab_id: int) -> list[int]:
@@ -129,7 +148,9 @@ def execute_lab_review_job(
     if lab is None:
         return jobs.fail_job(conn, job_id, lease_id, f"lab {row['target_id']} no longer exists")
 
-    result = jobs.run_with_session(conn, job_id, backend, _build_prompt(lab["root_problem"]))
+    result = jobs.run_with_session(
+        conn, job_id, backend, _build_prompt(lab["root_problem"], lab["seed_idea"])
+    )
 
     if result.rate_limited:
         jobs.record_rate_limit(
@@ -243,7 +264,7 @@ REVISE_PROMPT_TEMPLATE = """You are {name}, a professor in {field}. Your lab's r
 submitted to three independent reviewers and FAILED: it needs 2 of 3 strong_accept and did not \
 get them.
 
-Your current root problem:
+{seed_idea_block}Your current root problem:
 <root_problem>
 {root_problem}
 </root_problem>
@@ -264,6 +285,15 @@ tractable fails a different criterion.
 - If a reviewer shows your problem is already solved or follows from known work, that is real \
 information: re-centre on what genuinely remains open, and say what the known result settles.
 - Keep what was right. Do not rewrite passages nobody objected to.
+- Stay on the commissioned subject. Where an objection can only be
+  answered by changing what the lab is ABOUT, the objection has found the
+  limit of this lab, not a defect to rewrite away: address it within the
+  subject, or state plainly that it cannot be addressed without
+  abandoning the subject. Reviewers reward rigour, and a statement can be
+  made more rigorous indefinitely by drifting toward whatever is easiest
+  to state rigorously -- a measurement protocol, a preregistered trial.
+  That is how a lab ends up with an impeccable problem statement nobody
+  asked for.
 
 Respond with ONLY the revised root problem statement as plain prose. No preamble, no commentary \
 about what you changed.
@@ -341,6 +371,11 @@ def execute_lab_revise_job(
             field=professor["field"],
             root_problem=lab["root_problem"],
             reviews="\n\n".join(parts),
+            seed_idea_block=(
+                _SEED_IDEA_BLOCK.format(seed_idea=lab["seed_idea"].strip()) + "\n"
+                if lab["seed_idea"]
+                else ""
+            ),
         ),
     )
 

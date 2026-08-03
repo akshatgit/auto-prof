@@ -45,6 +45,17 @@ _ADDITIVE_MIGRATIONS = (
     # DIFFERENT families disagree, which is the signal that says whether
     # the mixing is buying anything.
     ("reviews", "reviewer_backend", "TEXT"),
+    # The human's original idea, verbatim, as handed to `create-prof`.
+    # It used to be consumed by generate_soul and then dropped, which is
+    # what let labs drift: round 1 is anchored to the idea by the soul
+    # prompt, but every later round only ever saw the PREVIOUS round's
+    # root problem plus reviewer critique. With no memory of what was
+    # actually asked for, the revise->review loop is a random walk driven
+    # by whatever the reviewers reward -- lab #2 was seeded as a meta lab
+    # on auto-prof itself and came out, three rounds later, a
+    # preregistered RCT in metascience. NULL for labs created before this
+    # column existed; both prompts omit the block when it is missing.
+    ("labs", "seed_idea", "TEXT"),
 )
 
 # Tables added after the schema first shipped. Mirrors the corresponding

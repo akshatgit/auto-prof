@@ -97,7 +97,9 @@ def generate_soul(idea: str, backend: Backend) -> dict:
     return soul
 
 
-def persist_professor(conn, name: str, field: str, root_problem: str, lab_dir: Path) -> tuple[int, int]:
+def persist_professor(
+    conn, name: str, field: str, root_problem: str, lab_dir: Path, seed_idea: str | None = None
+) -> tuple[int, int]:
     """Create the professor + lab rows and seed memory.md.
 
     Matches the bootstrap sequence validated against docs/schema.sql:
@@ -118,8 +120,14 @@ def persist_professor(conn, name: str, field: str, root_problem: str, lab_dir: P
         # vetted yet (autoprof/lab_review.py) -- the daemon won't dispatch
         # any work against this lab until a review passes and propagates
         # it to 'active'.
-        "INSERT INTO labs (professor_id, root_problem, status) VALUES (?, ?, 'pending_review')",
-        (professor_id, root_problem),
+        # seed_idea is stored verbatim and never rewritten. root_problem
+        # is a model's formalization of it and IS rewritten on every
+        # failed review round; keeping the idea alongside is what lets a
+        # later round check the formalization still answers what was
+        # asked, instead of only checking it against the previous round.
+        "INSERT INTO labs (professor_id, root_problem, status, seed_idea) "
+        "VALUES (?, ?, 'pending_review', ?)",
+        (professor_id, root_problem, (seed_idea or "").strip() or None),
     )
     lab_id = cur.lastrowid
 
@@ -184,7 +192,7 @@ def run(args: argparse.Namespace) -> int:
     conn = db.connect(args.db_path)
     db.ensure_initialized(conn)
     professor_id, lab_id = persist_professor(
-        conn, soul["name"], soul["field"], soul["root_problem"], args.lab_dir
+        conn, soul["name"], soul["field"], soul["root_problem"], args.lab_dir, seed_idea=idea
     )
 
     print(f"Created professor id={professor_id}, lab id={lab_id}.")

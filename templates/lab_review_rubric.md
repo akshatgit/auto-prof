@@ -39,6 +39,18 @@ Evaluate strictly on:
 4. **Tractability.** Does a plausible first task exist? Could a
    competent researcher identify a concrete, checkable first step toward
    this problem, even if the full problem remains open?
+5. **Fidelity to the commissioned subject.** Applies only when a seed
+   idea appears below. Is this still a formalization of what was asked
+   for, or has it become a different problem that happens to be stated
+   well? Ask specifically: is the OBJECT of study the same? A lab
+   commissioned to improve a system that instead proposes to measure
+   whether systems of that kind work has changed its object, however
+   rigorous the measurement plan. Judge the endpoint, not the distance
+   travelled -- several rounds of individually reasonable revisions
+   compound, and each one looked like a local improvement to the reviewer
+   who asked for it. Drift is a defect of the same order as vagueness: a
+   precisely stated problem nobody commissioned is not worth a lab's
+   years of work. Say concretely what the object was and what it became.
 
 Be skeptical by default, but remember: a `strong_accept` here means "this
 is worth a lab's worth of future work," not "this is already resolved."
@@ -61,3 +73,4 @@ ROOT PROBLEM STATEMENT UNDER REVIEW:
 ---
 
 {ROOT_PROBLEM}
+{SEED_IDEA_BLOCK}
