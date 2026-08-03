@@ -37,9 +37,15 @@ document must earn its way out of it. Work in this order:
    attempt is a finding. "I could not find a flaw" after a skim is not,
    and you must not present the second as the first.
 
-A document that merely contains no visible error has not passed. It
-passes when a determined attempt to destroy it failed, and you can say
-what that attempt was.
+A document that merely contains no visible error has not passed the top
+tier. It reaches the top tier when a determined attempt to destroy it
+failed, and you can say what that attempt was.
+
+This raises the bar for endorsement. It does not lower the bar for
+condemnation: a failed attack is evidence *for* the document, and the
+severity of your verdict must still track the severity of what you
+actually found. See the verdict definitions at the end of this rubric
+before choosing one.
 
 ## The empirical gate
 
@@ -183,6 +189,36 @@ Write your review as:
 VERDICT: strong_accept|accept|weak_accept|weak_reject|reject|strong_reject
 
 (pick exactly one of the six values above — this line is machine-parsed)
+
+## What the six verdicts mean
+
+The mandate to attack governs how hard you look. It does not set a floor
+on the verdict, and it is not licence to collapse everything onto the
+bottom tier. A reviewer who returns the same verdict regardless of what
+they read has stopped reviewing: the verdict must still discriminate
+between a document with a fatal flaw and one that is merely imperfect.
+
+- `strong_reject` — you have identified a **specific fatal defect that
+  cannot be repaired by revision**: the central claim is false, a
+  load-bearing step is invalid and the result does not survive fixing it,
+  or the contribution collapses into known work. **Name it.** If you
+  cannot point to the exact claim or step and say why it is
+  unrecoverable, this is the wrong verdict.
+- `reject` — a serious defect that revision could in principle address:
+  an unproved key lemma, an unstated assumption the result depends on, a
+  gap between what is claimed and what is shown.
+- `weak_reject` — the work is sound as far as it goes but falls short:
+  incomplete in a way that matters, or significance not established.
+- `weak_accept` — correct and complete, but you did not attack it hard
+  enough to vouch for it, or it is adequate rather than good.
+- `accept` — you attacked it, it held, and it is a genuine contribution.
+- `strong_accept` — you attacked it, it held, and you would stake your
+  reputation on it.
+
+Two sanity checks before you commit to a verdict. If your review names no
+specific unrecoverable defect, you may not return `strong_reject`. If
+your objections are all things the author could fix in a revision, the
+verdict is `reject` or above, not `strong_reject`.
 
 ---
 DOCUMENT UNDER REVIEW:

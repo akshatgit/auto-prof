@@ -79,6 +79,16 @@ class BuildReviewPromptTests(unittest.TestCase):
         self.assertIn("falsif", prompt.lower())
         self.assertIn("Revision is not a reason to soften", prompt)
 
+    def test_defines_the_verdict_tiers(self):
+        # The kill mandate without tier definitions collapsed every review
+        # onto strong_reject -- 9 of 9, against a prior spread across all
+        # six verdicts. A reviewer returning one constant verdict has
+        # stopped discriminating, so the rubric must say what separates
+        # an unrecoverable defect from a fixable one.
+        prompt = paper_review.build_review_prompt("<h1>Doc</h1>")
+        self.assertIn("cannot be repaired by revision", prompt)
+        self.assertIn("you may not return `strong_reject`", prompt)
+
 
 class RequestPaperReviewTests(unittest.TestCase):
     def test_enqueues_three_jobs_for_the_current_round(self):
