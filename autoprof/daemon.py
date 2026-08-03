@@ -113,7 +113,8 @@ def _fail_unhandled(conn: sqlite3.Connection, job_id: int, error: Exception) -> 
 
 
 def _execute_one(
-    db_path, job_id: int, kind: str, registry, prompt_builders, lab_dir, special_handlers
+    db_path, job_id: int, kind: str, registry, prompt_builders, lab_dir, special_handlers,
+    reviewer_index: int | None = None,
 ) -> str:
     """Run one job on its own connection.
 
@@ -126,7 +127,7 @@ def _execute_one(
     conn = db_module.connect(db_path)
     try:
         try:
-            backend = registry.get_backend(kind)
+            backend = registry.get_backend(kind, reviewer_index)
         except Exception as e:  # noqa: BLE001
             _fail_unhandled(conn, job_id, e)
             return "failed"
@@ -174,7 +175,7 @@ def dispatch_pending_jobs(
     # untried work means a struggling job still makes progress -- it just
     # yields to jobs that have not had their turn yet.
     candidate_rows = conn.execute(
-        "SELECT id, kind FROM jobs WHERE status='pending' "
+        "SELECT id, kind, reviewer_index FROM jobs WHERE status='pending' "
         "AND (not_before IS NULL OR not_before <= datetime('now')) "
         "ORDER BY attempts, created_at LIMIT ?",
         (max(budget_cap * 4, budget_cap),),
@@ -191,6 +192,7 @@ def dispatch_pending_jobs(
                 lambda row: _execute_one(
                     db_path, row["id"], row["kind"], registry,
                     prompt_builders, lab_dir, special_handlers,
+                    row["reviewer_index"],
                 ),
                 chosen,
             ))
@@ -205,7 +207,9 @@ def dispatch_pending_jobs(
         # code older than the kind it is dispatching hits exactly this,
         # and it used to take the whole loop down with it.
         try:
-            backend = registry.get_backend(candidate["kind"])
+            backend = registry.get_backend(
+                candidate["kind"], candidate["reviewer_index"]
+            )
         except Exception as e:  # noqa: BLE001 -- one job's problem, not the loop's
             _fail_unhandled(conn, candidate["id"], e)
             dispatched += 1

@@ -208,5 +208,82 @@ class ArtifactPathTests(unittest.TestCase):
             self.assertEqual(webserver._read_artifact(root, "sub/p.html"), "hello")
 
 
+class TaskTimelineTests(unittest.TestCase):
+    """Eleven `continue` meetings followed by a forced write-up is a story
+    no table of counts tells."""
+
+    def test_empty_history_says_so(self):
+        self.assertIn("no supervision or review history",
+                      webserver.render_task_timeline([], []))
+
+    def test_meetings_and_rounds_share_one_axis(self):
+        svg = webserver.render_task_timeline(
+            [{"round": 1, "verdict": "continue", "path": "p"},
+             {"round": 2, "verdict": "ready", "path": "p"}],
+            [{"round": 1, "verdicts": ["accept", "reject", "accept"], "strong": 0}],
+        )
+        self.assertTrue(svg.startswith("<svg"))
+        self.assertIn("supervision", svg)
+        self.assertIn("review", svg)
+        self.assertIn("m1", svg)
+        self.assertIn("r1", svg)
+
+    def test_verdicts_carry_text_not_colour_alone(self):
+        """Colour alone excludes colour-blind readers and greyscale."""
+        svg = webserver.render_task_timeline(
+            [{"round": 1, "verdict": "ready", "path": "p"}],
+            [{"round": 1, "verdicts": ["strong_accept"], "strong": 1}],
+        )
+        self.assertIn("READY", svg)      # supervision verdict spelled out
+        self.assertIn("1x++", svg)       # strong_accept count spelled out
+        self.assertIn("<title>strong_accept</title>", svg)  # hover text
+
+    def test_each_reviewer_is_drawn_separately(self):
+        """A round is three verdicts; averaging them into one mark hides
+        a 2-1 split."""
+        svg = webserver.render_task_timeline(
+            [], [{"round": 1, "verdicts": ["strong_accept", "reject", "accept"], "strong": 1}]
+        )
+        self.assertEqual(svg.count("<rect"), 3)
+
+    def test_svg_scales_with_history_length(self):
+        long_history = [{"round": i, "verdict": "continue", "path": "p"} for i in range(1, 12)]
+        wide = webserver.render_task_timeline(long_history, [])
+        narrow = webserver.render_task_timeline(long_history[:2], [])
+        self.assertGreater(len(wide), len(narrow))
+
+
+class TaskDetailTests(unittest.TestCase):
+    def test_missing_task_is_none(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(webserver.render_task_detail(conn, 999, Path(d)))
+        conn.close()
+
+    def test_shows_supervision_papers_and_ledger(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        conn.execute(
+            "INSERT INTO supervisions (task_id, student_id, round, verdict, guidance_path) "
+            "VALUES (?, ?, 1, 'continue', 'g.md')", (ids["task_id"], ids["student_id"]))
+        conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'A Paper', 'in_review', 1)",
+            (ids["task_id"], ids["student_id"]))
+        conn.execute(
+            "INSERT INTO assumptions (lab_id, task_id, student_id, statement, source, status) "
+            "VALUES (?, ?, ?, 'an inherited premise', 'brief', 'assumed')",
+            (ids["lab_id"], ids["task_id"], ids["student_id"]))
+        conn.commit()
+
+        with tempfile.TemporaryDirectory() as d:
+            html = webserver.render_task_detail(conn, ids["task_id"], Path(d))
+        self.assertIn("Long-horizon progress", html)
+        self.assertIn("A Paper", html)
+        self.assertIn("an inherited premise", html)
+        self.assertIn("meeting 1", html)
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

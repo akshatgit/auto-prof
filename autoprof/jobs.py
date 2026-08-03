@@ -127,8 +127,36 @@ def fail_job(conn: sqlite3.Connection, job_id: int, lease_id: str, error_message
     return "failed"
 
 
+def block_provider(
+    conn: sqlite3.Connection, provider: str, seconds: float, signal: str | None = None
+) -> None:
+    """Back the whole provider off, not just the job that hit the limit.
+
+    The circuit breaker (§6): a rate limit is a property of the PROVIDER,
+    so once one job sees it every other job routed to that provider should
+    stop trying. Without this each concurrent worker independently
+    rediscovers the same limit -- with four workers that is four wasted
+    calls where one would do, and the waste scales with concurrency.
+    """
+    conn.execute(
+        "INSERT INTO provider_state (provider, blocked_until, last_signal) "
+        "VALUES (?, datetime('now', ?), ?) "
+        "ON CONFLICT(provider) DO UPDATE SET "
+        # MAX so a longer backoff already in force is never shortened by a
+        # later, smaller one.
+        "blocked_until = MAX(COALESCE(blocked_until, ''), excluded.blocked_until), "
+        "last_signal = excluded.last_signal",
+        (provider, f"+{max(1, int(seconds))} seconds", (signal or "")[:500]),
+    )
+    conn.commit()
+
+
 def record_rate_limit(
-    conn: sqlite3.Connection, job_id: int, lease_id: str, retry_after_seconds: float | None
+    conn: sqlite3.Connection,
+    job_id: int,
+    lease_id: str,
+    retry_after_seconds: float | None,
+    provider: str | None = None,
 ) -> bool:
     """A rate limit is not a failure -- stays `pending`, never touches
     `attempts`. Returns False on a stale lease, same as fail_job. §5.3."""
@@ -140,6 +168,8 @@ def record_rate_limit(
 
     rate_limit_count = row["rate_limit_count"] + 1
     backoff = compute_rate_limit_backoff_seconds(rate_limit_count, retry_after_seconds)
+    if provider:
+        block_provider(conn, provider, backoff, f"rate limited on job {job_id}")
     conn.execute(
         "UPDATE jobs SET status='pending', rate_limit_count=?, "
         "not_before=datetime('now', ?), wait_reason='rate_limited', "

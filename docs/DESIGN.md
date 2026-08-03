@@ -288,13 +288,35 @@ same machinery as any other lab.
 ## 4. Review Pipeline
 
 - Every review gate (paper: 3 reviewers / 2-of-3 threshold; defense: 5
-  reviewers / 4-of-5 threshold) dispatches N independent `codex exec`
-  subprocess calls.
-- **Isolation is the whole point**: each call is a fresh subprocess, gets
-  only the document under review plus `templates/review_rubric.md` as its
-  prompt, and has no visibility into whether other reviewers exist, let
-  alone their verdicts. This is what makes "2 of 3 strong accept" a signal
-  distinct from "one reviewer's opinion, asked three times."
+  reviewers / 4-of-5 threshold) dispatches N independent subprocess calls,
+  assigned across a **mixed panel** of model families.
+- **Isolation is necessary but not sufficient**: each call is a fresh
+  subprocess, gets only the document under review plus
+  `templates/review_rubric.md` as its prompt, and has no visibility into
+  whether other reviewers exist, let alone their verdicts. That is what
+  makes "2 of 3 strong accept" different from "one reviewer's opinion,
+  asked three times."
+- **Process isolation does not buy independence of judgement.** Three
+  `codex exec` calls are three processes of ONE model: they share training
+  data and blind spots, so a flaw invisible to one is invisible to all
+  three, and unanimity measures agreement within a family rather than
+  correctness. The collaborating `refute-or-promote` work has the clean
+  counterexample — ten dedicated reviewers unanimously endorsed a
+  Bleichenbacher padding oracle in OpenSSL's CMS module that did not
+  exist; only an empirical test killed it. Convergence among like
+  reviewers is not calibration.
+- So reviewer *n* is resolved through `DEFAULT_REVIEW_PANEL`
+  (`codex, claude, codex`), cycling if the gate has more reviewers than
+  the panel has entries — a 5-member defense panel is therefore
+  codex/claude/codex/claude/codex and can never collapse to one family.
+  Override with `AUTOPROF_REVIEW_PANEL` or `backends.review_panel` in
+  config. Mixing does not make any single review better; it decorrelates
+  the panel's errors, which is what makes the vote informative.
+- Each review row records `reviewer_backend`, so a panel that silently
+  collapsed to one family is visible after the fact, and cross-family
+  disagreement rates are measurable rather than assumed.
+- Claude reviewers run with `--permission-mode plan`: a reviewer that
+  could edit files could "fix" the paper it was judging.
 - The rubric forces a machine-parseable verdict line:
   `VERDICT: strong_accept|accept|weak_accept|weak_reject|reject|strong_reject`
   The harness parses this line; the full response is stored verbatim as

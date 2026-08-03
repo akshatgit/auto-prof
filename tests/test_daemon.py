@@ -38,7 +38,7 @@ class FakeRegistry:
     def __init__(self, backend):
         self.backend = backend
 
-    def get_backend(self, kind):
+    def get_backend(self, kind, reviewer_index=None):
         return self.backend
 
 
@@ -280,7 +280,7 @@ class OnTickCallbackTests(unittest.TestCase):
 
 
 class _NullRegistry:
-    def get_backend(self, kind):
+    def get_backend(self, kind, reviewer_index=None):
         raise AssertionError("no jobs should be dispatched in these tests")
 
 
@@ -304,7 +304,7 @@ class DispatchOrderingTests(unittest.TestCase):
         dispatched = []
 
         class _Reg:
-            def get_backend(self, kind):
+            def get_backend(self, kind, reviewer_index=None):
                 return SimpleNamespace(name="fake")
 
         def handler(conn_, job_id, backend, lab_dir):
@@ -326,7 +326,7 @@ class HandlerCrashTests(unittest.TestCase):
     every lab halted until a human noticed."""
 
     class _Reg:
-        def get_backend(self, kind):
+        def get_backend(self, kind, reviewer_index=None):
             return SimpleNamespace(name="fake")
 
     def _job(self, conn, ids):
@@ -394,7 +394,7 @@ class UnknownKindTests(unittest.TestCase):
         conn.commit()
 
         class _Reg:
-            def get_backend(self, kind):
+            def get_backend(self, kind, reviewer_index=None):
                 raise ValueError(f"unknown job kind: {kind!r}")
 
         dispatched = daemon.dispatch_pending_jobs(
@@ -420,7 +420,7 @@ class UnknownKindTests(unittest.TestCase):
         seen = []
 
         class _Reg:
-            def get_backend(self, kind):
+            def get_backend(self, kind, reviewer_index=None):
                 if kind == "student_work":
                     return SimpleNamespace(name="fake")
                 raise ValueError(f"unknown job kind: {kind!r}")
@@ -438,7 +438,7 @@ class ConcurrentDispatchTests(unittest.TestCase):
     from locking: claim_job is one atomic conditional UPDATE."""
 
     class _Reg:
-        def get_backend(self, kind):
+        def get_backend(self, kind, reviewer_index=None):
             return SimpleNamespace(name="fake")
 
     def _db(self, tmp, n_jobs):

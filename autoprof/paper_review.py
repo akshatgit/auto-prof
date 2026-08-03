@@ -124,7 +124,9 @@ def execute_paper_review_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
@@ -146,9 +148,12 @@ def execute_paper_review_job(
     write_artifact(lab_dir / relpath, result.text)
 
     conn.execute(
-        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path) "
-        "VALUES ('paper', ?, ?, ?, ?, ?)",
-        (paper["id"], row["review_round"], row["reviewer_index"], verdict, relpath),
+        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path, reviewer_backend) "
+        "VALUES ('paper', ?, ?, ?, ?, ?, ?)",
+        (
+            paper["id"], row["review_round"], row["reviewer_index"], verdict,
+            relpath, backend.name,
+        ),
     )
 
     if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):

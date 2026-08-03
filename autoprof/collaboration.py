@@ -313,7 +313,9 @@ def execute_collaboration_round_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
@@ -420,7 +422,9 @@ def execute_collaboration_synthesis_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
@@ -623,7 +627,9 @@ def execute_collaboration_scan_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)

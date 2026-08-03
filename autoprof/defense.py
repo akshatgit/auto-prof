@@ -178,7 +178,9 @@ def execute_student_write_defense_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
@@ -269,7 +271,9 @@ def execute_defense_review_job(
 
     result = jobs.run_with_session(conn, job_id, backend, build_review_prompt(path.read_text()))
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)
@@ -292,9 +296,12 @@ def execute_defense_review_job(
     )
     write_artifact(lab_dir / relpath, result.text)
     conn.execute(
-        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path) "
-        "VALUES ('defense', ?, ?, ?, ?, ?)",
-        (defense["id"], row["review_round"], row["reviewer_index"], matches[-1], relpath),
+        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path, reviewer_backend) "
+        "VALUES ('defense', ?, ?, ?, ?, ?, ?)",
+        (
+            defense["id"], row["review_round"], row["reviewer_index"], matches[-1],
+            relpath, backend.name,
+        ),
     )
 
     if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
@@ -406,7 +413,9 @@ def execute_propose_lab_job(
     )
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
     if result.is_error:
         return jobs.fail_job(conn, job_id, lease_id, result.error)

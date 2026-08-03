@@ -71,6 +71,22 @@ def _e(value) -> str:
     return html.escape(str(value)) if value is not None else ""
 
 
+
+def _reviewer_label(row) -> str:
+    """`#2 (claude)` -- names the model family that judged.
+
+    Shown because a panel is only meaningful if it is actually mixed, and
+    the failure mode is silent: a misconfigured panel that collapses to
+    one family still renders three reviews that look independent.
+    """
+    try:
+        backend = row["reviewer_backend"]
+    except (IndexError, KeyError):
+        backend = None
+    suffix = f" <span class='muted'>({_e(backend)})</span>" if backend else ""
+    return f"#{row['reviewer_index']}{suffix}"
+
+
 def _plain_preview(text: str, limit: int = 140) -> str:
     """A readable one-line preview of a LaTeX document.
 
@@ -118,13 +134,13 @@ def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
     ).fetchall()
 
     task_rows = "".join(
-        f"<tr><td>#{t['id']}</td><td>{_e(t['title'])}</td><td class='status'>{_e(t['status'])}</td>"
+        f"<tr><td><a href='/tasks/{t['id']}'>#{t['id']}</a></td><td>{_e(t['title'])}</td><td class='status'>{_e(t['status'])}</td>"
         f"<td>{_e(t['direction'])}</td><td>{_task_paper_links(conn, t['id'])}</td></tr>"
         for t in tasks
     ) or "<tr><td colspan='5'><em>no tasks yet</em></td></tr>"
 
     review_rows = "".join(
-        f"<tr><td>round {r['review_round']}</td><td>#{r['reviewer_index']}</td>"
+        f"<tr><td>round {r['review_round']}</td><td>{_reviewer_label(r)}</td>"
         f"<td class='status'>{_e(r['verdict'])}</td></tr>"
         for r in reviews
     ) or "<tr><td colspan='3'><em>no reviews yet</em></td></tr>"
@@ -221,7 +237,7 @@ def render_paper_detail(conn: sqlite3.Connection, paper_id: int) -> str | None:
         (paper_id,),
     ).fetchall()
     review_rows = "".join(
-        f"<tr><td>round {r['review_round']}</td><td>#{r['reviewer_index']}</td>"
+        f"<tr><td>round {r['review_round']}</td><td>{_reviewer_label(r)}</td>"
         f"<td class='status'>{_e(r['verdict'])}</td>"
         f"<td><a href='/reviews/{r['id']}'>rationale</a></td></tr>"
         for r in reviews
@@ -317,7 +333,7 @@ def render_review_rationale(conn: sqlite3.Connection, review_id: int, lab_dir) -
     body = (
         f"<p><a href='{back}'>&larr; back</a></p>"
         f"<h1>Review: {_e(review['target_type'])} #{review['target_id']}</h1>"
-        f"<p>round {review['review_round']} &mdash; reviewer #{review['reviewer_index']} "
+        f"<p>round {review['review_round']} &mdash; reviewer {_reviewer_label(review)} "
         f"&mdash; verdict: <span class='status'>{_e(review['verdict'])}</span></p>"
         f"<div class='doc'>{markdown.render(text)}</div>"
     )
@@ -327,6 +343,205 @@ def render_review_rationale(conn: sqlite3.Connection, review_id: int, lab_dir) -
 # Each entry: (pattern, render(conn, match, lab_dir)). lab_dir is passed to
 # every route so the file-backed ones (papers, review rationales) can reach
 # the artifacts; DB-only routes ignore it.
+# Status colours, paired ALWAYS with a text label -- verdict is state, not
+# category, and colour alone excludes colour-blind readers and greyscale
+# printing. See the palette validation in autoprof/tools.py.
+_VERDICT_STYLE = {
+    "strong_accept": ("#1b7f4f", "++"),
+    "accept": ("#1baf7a", "+"),
+    "weak_accept": ("#eda100", "~+"),
+    "weak_reject": ("#eb6834", "~-"),
+    "reject": ("#d9432f", "-"),
+    "strong_reject": ("#a02617", "--"),
+}
+_SUPERVISION_STYLE = {
+    "continue": ("#2a78d6", "continue"),
+    "ready": ("#1b7f4f", "READY"),
+    "abandon": ("#a02617", "abandoned"),
+}
+
+
+def render_task_timeline(meetings, rounds) -> str:
+    """The long-horizon arc of one task as an inline SVG.
+
+    Two tracks on one time axis because they are one story: the
+    supervision loop that ran BEFORE any paper existed, then the review
+    rounds after. Seeing eleven `continue` meetings followed by a forced
+    write-up tells you something no table of counts does.
+    """
+    if not meetings and not rounds:
+        return "<p><em>no supervision or review history yet</em></p>"
+
+    step, left, top = 66, 90, 34
+    # Lane separation is set by LOOKING at the render: at 58 the
+    # supervision caption and the review round label sat 12px apart and
+    # read as one line. Layout collisions are invisible to tests.
+    lane_h = 86
+    width = max(560, left + step * (max(len(meetings), len(rounds)) + 1))
+    height = top + lane_h * 2 + 20
+
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'role="img" aria-label="task timeline: {len(meetings)} supervision meetings, '
+        f'{len(rounds)} review rounds">',
+        '<g font-family="system-ui, sans-serif" font-size="11">',
+    ]
+
+    for lane, (label, items) in enumerate(
+        (("supervision", meetings), ("review", rounds))
+    ):
+        y = top + lane * lane_h
+        out.append(
+            f'<text x="8" y="{y + 4}" fill="#52514e" font-weight="bold">{label}</text>'
+        )
+        if not items:
+            out.append(f'<text x="{left}" y="{y + 4}" fill="#8a8983">none</text>')
+            continue
+        out.append(
+            f'<line x1="{left}" y1="{y}" x2="{left + step * (len(items) - 1) + 1}" y2="{y}" '
+            'stroke="#ddd" stroke-width="2"/>'
+        )
+        for index, item in enumerate(items):
+            x = left + index * step
+            if lane == 0:
+                colour, caption = _SUPERVISION_STYLE.get(item["verdict"], ("#8a8983", item["verdict"]))
+                out.append(f'<circle cx="{x}" cy="{y}" r="7" fill="{colour}"/>')
+                out.append(
+                    f'<text x="{x}" y="{y - 14}" text-anchor="middle" fill="#52514e">'
+                    f'm{item["round"]}</text>'
+                )
+                out.append(
+                    f'<text x="{x}" y="{y + 22}" text-anchor="middle" fill="#52514e" '
+                    f'font-size="9">{caption}</text>'
+                )
+            else:
+                # A round is 3 verdicts; draw them stacked so the tally is
+                # visible rather than averaged into one mark.
+                for slot, verdict in enumerate(item["verdicts"]):
+                    colour, mark = _VERDICT_STYLE.get(verdict, ("#8a8983", "?"))
+                    cy = y - 10 + slot * 10
+                    out.append(
+                        f'<rect x="{x - 9}" y="{cy - 4}" width="18" height="8" rx="2" '
+                        f'fill="{colour}"><title>{_e(verdict)}</title></rect>'
+                    )
+                out.append(
+                    f'<text x="{x}" y="{y - 24}" text-anchor="middle" fill="#52514e">'
+                    f'r{item["round"]}</text>'
+                )
+                out.append(
+                    f'<text x="{x}" y="{y + 26}" text-anchor="middle" fill="#52514e" '
+                    f'font-size="9">{item["strong"]}x++</text>'
+                )
+
+    out.append("</g></svg>")
+    return "".join(out)
+
+
+def render_task_detail(conn: sqlite3.Connection, task_id: int, lab_dir) -> str | None:
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if task is None:
+        return None
+
+    meetings = [
+        {"round": r["round"], "verdict": r["verdict"], "path": r["guidance_path"]}
+        for r in conn.execute(
+            "SELECT * FROM supervisions WHERE task_id = ? ORDER BY round", (task_id,)
+        )
+    ]
+
+    papers = conn.execute(
+        "SELECT * FROM papers WHERE task_id = ? ORDER BY id", (task_id,)
+    ).fetchall()
+    rounds = []
+    for paper in papers:
+        for row in conn.execute(
+            "SELECT review_round, GROUP_CONCAT(verdict) AS vs, "
+            "SUM(verdict='strong_accept') AS strong FROM reviews "
+            "WHERE target_type='paper' AND target_id=? GROUP BY review_round ORDER BY review_round",
+            (paper["id"],),
+        ):
+            rounds.append({
+                "round": row["review_round"],
+                "verdicts": (row["vs"] or "").split(","),
+                "strong": row["strong"] or 0,
+            })
+
+    meeting_rows = "".join(
+        f"<tr><td>meeting {m['round']}</td>"
+        f"<td class='status'>{_e(m['verdict'])}</td>"
+        f"<td><a href='/supervision/{task_id}/{m['round']}'>guidance</a></td></tr>"
+        for m in meetings
+    ) or "<tr><td colspan='3'><em>no supervision meetings yet</em></td></tr>"
+
+    paper_rows = "".join(
+        f"<tr><td><a href='/papers/{p['id']}'>#{p['id']}</a></td>"
+        f"<td>{_e(p['title'][:70])}</td>"
+        f"<td class='status'>{_e(p['status'])}</td><td>round {p['review_round']}</td></tr>"
+        for p in papers
+    ) or "<tr><td colspan='4'><em>no papers yet</em></td></tr>"
+
+    ledger = conn.execute(
+        "SELECT * FROM assumptions WHERE task_id = ? ORDER BY "
+        "CASE status WHEN 'refuted' THEN 0 WHEN 'assumed' THEN 1 ELSE 2 END, id",
+        (task_id,),
+    ).fetchall()
+    ledger_rows = "".join(
+        f"<tr><td class='status'>{_e(a['source'])}/{_e(a['status'])}</td>"
+        f"<td>{_e(a['statement'][:140])}</td></tr>"
+        for a in ledger
+    ) or "<tr><td colspan='2'><em>no assumptions registered</em></td></tr>"
+
+    tools_run = conn.execute(
+        "SELECT * FROM tool_runs WHERE task_id = ? ORDER BY id DESC LIMIT 20", (task_id,)
+    ).fetchall()
+    tool_rows = "".join(
+        f"<tr><td>#{t['id']}</td><td>{_e(t['tool'])}</td>"
+        f"<td class='status'>{_e(t['status'])}</td>"
+        f"<td>{_e((t['summary'] or '')[:80])}</td></tr>"
+        for t in tools_run
+    ) or "<tr><td colspan='4'><em>no tool runs</em></td></tr>"
+
+    body = (
+        f"<p><a href='/labs/{task['lab_id']}'>&larr; lab #{task['lab_id']}</a></p>"
+        f"<h1>Task #{task['id']}</h1>"
+        f"<p>{_e(task['title'])}</p>"
+        f"<p>status: <span class='status'>{_e(task['status'])}</span> "
+        f"&mdash; direction: {_e(task['direction'])}"
+        + (f" &mdash; student <a href='/students/{task['assigned_student_id']}'>"
+           f"#{task['assigned_student_id']}</a>" if task["assigned_student_id"] else "")
+        + "</p>"
+        f"<h2>Long-horizon progress</h2>{render_task_timeline(meetings, rounds)}"
+        f"<h2>End criteria</h2><div class='mathdoc'>{_e(task['end_criteria'])}</div>"
+        f"<h2>Supervision ({len(meetings)} meetings)</h2>"
+        f"<table><tr><th></th><th>verdict</th><th></th></tr>{meeting_rows}</table>"
+        f"<h2>Papers</h2><table><tr><th>id</th><th>title</th><th>status</th><th></th></tr>"
+        f"{paper_rows}</table>"
+        f"<h2>Assumption ledger</h2><table><tr><th>source/status</th><th>statement</th></tr>"
+        f"{ledger_rows}</table>"
+        f"<h2>Tool runs</h2><table><tr><th>id</th><th>tool</th><th>status</th><th>summary</th></tr>"
+        f"{tool_rows}</table>"
+    )
+    return _PAGE.format(title=f"autoprof — Task #{task['id']}", body=body)
+
+
+def render_supervision(conn: sqlite3.Connection, task_id: int, round_: int, lab_dir) -> str | None:
+    row = conn.execute(
+        "SELECT * FROM supervisions WHERE task_id = ? AND round = ?", (task_id, round_)
+    ).fetchone()
+    if row is None:
+        return None
+    text = _read_artifact(lab_dir, row["guidance_path"])
+    if text is None:
+        return None
+    body = (
+        f"<p><a href='/tasks/{task_id}'>&larr; task #{task_id}</a></p>"
+        f"<h1>Supervision meeting {round_}</h1>"
+        f"<p>verdict: <span class='status'>{_e(row['verdict'])}</span></p>"
+        f"<div class='doc'>{markdown.render(text)}</div>"
+    )
+    return _PAGE.format(title=f"autoprof — task {task_id} meeting {round_}", body=body)
+
+
 _ROUTES = [
     (re.compile(r"^/$"), lambda conn, m, d: render_lab_list(conn)),
     (re.compile(r"^/labs/(\d+)$"), lambda conn, m, d: render_lab_detail(conn, int(m.group(1)))),
@@ -335,6 +550,9 @@ _ROUTES = [
     (re.compile(r"^/papers/(\d+)$"), lambda conn, m, d: render_paper_detail(conn, int(m.group(1)))),
     (re.compile(r"^/papers/(\d+)/full$"), lambda conn, m, d: render_paper_full(conn, int(m.group(1)), d)),
     (re.compile(r"^/reviews/(\d+)$"), lambda conn, m, d: render_review_rationale(conn, int(m.group(1)), d)),
+    (re.compile(r"^/tasks/(\d+)$"), lambda conn, m, d: render_task_detail(conn, int(m.group(1)), d)),
+    (re.compile(r"^/supervision/(\d+)/(\d+)$"),
+     lambda conn, m, d: render_supervision(conn, int(m.group(1)), int(m.group(2)), d)),
 ]
 
 

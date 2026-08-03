@@ -515,6 +515,7 @@ CREATE TABLE reviews (
                         ('strong_reject', 'reject', 'weak_reject',
                          'weak_accept', 'accept', 'strong_accept')),
     rationale_path  TEXT NOT NULL,   -- .../reviews/<round>/<reviewer_index>.md
+    reviewer_backend TEXT,           -- which model family judged (panel audit)
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (target_type, target_id, review_round, reviewer_index)
 );

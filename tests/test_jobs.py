@@ -351,5 +351,68 @@ class RunWithSessionTests(unittest.TestCase):
         conn.close()
 
 
+class ProviderCircuitBreakerTests(unittest.TestCase):
+    """A rate limit is a property of the PROVIDER. Without arming the
+    breaker each concurrent worker rediscovers the same limit -- four
+    workers, four wasted calls, and the waste scales with concurrency."""
+
+    def _running_job(self, conn):
+        ids = seed_lab_with_student(conn)
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_work', 'task', ?, 'pending')",
+            (ids["task_id"],),
+        )
+        job_id = cur.lastrowid
+        conn.commit()
+        jobs.claim_job(conn, job_id, "lease-1", 600)
+        return job_id
+
+    def test_rate_limit_blocks_the_whole_provider(self):
+        conn = fresh_db()
+        job_id = self._running_job(conn)
+        jobs.record_rate_limit(conn, job_id, "lease-1", 120, provider="codex")
+
+        row = conn.execute("SELECT * FROM provider_state WHERE provider='codex'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["blocked_until"])
+        self.assertIn("rate limited", row["last_signal"])
+        conn.close()
+
+    def test_a_longer_block_is_never_shortened_by_a_later_one(self):
+        conn = fresh_db()
+        jobs.block_provider(conn, "codex", 3600, "long")
+        first = conn.execute(
+            "SELECT blocked_until FROM provider_state WHERE provider='codex'"
+        ).fetchone()[0]
+        jobs.block_provider(conn, "codex", 5, "short")
+        second = conn.execute(
+            "SELECT blocked_until FROM provider_state WHERE provider='codex'"
+        ).fetchone()[0]
+        self.assertEqual(first, second)
+        conn.close()
+
+    def test_omitting_the_provider_leaves_the_breaker_alone(self):
+        """Job-level backoff still works without a provider name."""
+        conn = fresh_db()
+        job_id = self._running_job(conn)
+        self.assertTrue(jobs.record_rate_limit(conn, job_id, "lease-1", 60))
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM provider_state").fetchone()[0], 0
+        )
+        conn.close()
+
+    def test_rate_limit_still_costs_no_attempt(self):
+        """A rate limit is not a failure -- §5.3."""
+        conn = fresh_db()
+        job_id = self._running_job(conn)
+        jobs.record_rate_limit(conn, job_id, "lease-1", 60, provider="codex")
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["wait_reason"], "rate_limited")
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

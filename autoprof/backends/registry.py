@@ -13,6 +13,7 @@ import tomllib
 from pathlib import Path
 
 from .base import Backend
+from .claude_cli import ClaudeBackend
 from .codex import CodexBackend
 from .ollama_cloud import OllamaCloudBackend
 
@@ -39,8 +40,38 @@ DEFAULT_BACKEND_FOR_CATEGORY = {"generation": "ollama_cloud", "review": "codex"}
 
 BACKEND_CLASSES: dict[str, type[Backend]] = {
     "codex": CodexBackend,
+    "claude": ClaudeBackend,
     "ollama_cloud": OllamaCloudBackend,
 }
+
+# The review PANEL: which backend runs reviewer #1, #2, #3 ...
+#
+# Reviewer independence is the load-bearing assumption behind every review
+# gate in this system -- 2-of-3 on a paper, 4-of-5 on a defense -- and
+# three processes of the SAME model are not three independent opinions.
+# They share training data and blind spots, so a flaw invisible to one is
+# invisible to all three and unanimity measures family agreement, not
+# correctness. Mixing families does not make any single review better; it
+# decorrelates the panel's errors, which is the only thing that makes the
+# vote informative.
+#
+# The panel cycles if there are more reviewers than entries, so a 5-member
+# defense panel off a 2-entry panel is codex, claude, codex, claude, codex
+# -- never all one family.
+DEFAULT_REVIEW_PANEL = ("codex", "claude", "codex")
+
+
+def review_panel(config: dict, env: dict) -> list[str]:
+    """Ordered backend names for reviewers 1..N. Env wins over config."""
+    raw = env.get("AUTOPROF_REVIEW_PANEL") or ""
+    if raw.strip():
+        names = [part.strip() for part in raw.split(",") if part.strip()]
+        if names:
+            return names
+    configured = config.get("backends", {}).get("review_panel")
+    if configured:
+        return [str(name) for name in configured]
+    return list(DEFAULT_REVIEW_PANEL)
 
 
 def classify_kind(kind: str) -> str:
@@ -51,7 +82,9 @@ def classify_kind(kind: str) -> str:
     raise ValueError(f"unknown job kind: {kind!r}")
 
 
-def resolve_backend_name(kind: str, config: dict, env: dict) -> str:
+def resolve_backend_name(
+    kind: str, config: dict, env: dict, reviewer_index: int | None = None
+) -> str:
     per_kind_env_key = f"AUTOPROF_BACKEND_{kind.upper()}"
     if env.get(per_kind_env_key):
         return env[per_kind_env_key]
@@ -61,6 +94,14 @@ def resolve_backend_name(kind: str, config: dict, env: dict) -> str:
         return overrides[kind]
 
     category = classify_kind(kind)
+
+    # Panel assignment sits below the explicit per-kind overrides (so
+    # pinning a kind to one backend still works) but above the category
+    # default, because a mixed panel IS the review default.
+    if category == "review" and reviewer_index:
+        panel = review_panel(config, env)
+        if panel:
+            return panel[(reviewer_index - 1) % len(panel)]
 
     category_env_key = f"AUTOPROF_{category.upper()}_BACKEND"
     if env.get(category_env_key):
@@ -95,8 +136,8 @@ class Registry:
         self.backend_classes = backend_classes if backend_classes is not None else BACKEND_CLASSES
         self._instances: dict[str, Backend] = {}
 
-    def get_backend(self, kind: str) -> Backend:
-        name = resolve_backend_name(kind, self.config, self.env)
+    def get_backend(self, kind: str, reviewer_index: int | None = None) -> Backend:
+        name = resolve_backend_name(kind, self.config, self.env, reviewer_index)
         if name not in self._instances:
             cls = self.backend_classes.get(name)
             if cls is None:

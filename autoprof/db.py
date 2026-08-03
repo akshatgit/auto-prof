@@ -39,6 +39,12 @@ _ADDITIVE_MIGRATIONS = (
     # here -- SQLite's ADD COLUMN rejects UNIQUE -- so existing rows are
     # backfilled below and the uniqueness is enforced by a separate index.
     ("jobs", "operation_id", "TEXT"),
+    # Which backend produced this review. Without it there is no way to
+    # audit that a panel was actually mixed rather than silently collapsed
+    # to one model family -- and no way to measure how often reviewers of
+    # DIFFERENT families disagree, which is the signal that says whether
+    # the mixing is buying anything.
+    ("reviews", "reviewer_backend", "TEXT"),
 )
 
 # Tables added after the schema first shipped. Mirrors the corresponding

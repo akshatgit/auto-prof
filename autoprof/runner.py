@@ -64,7 +64,9 @@ def execute_job(
     result = jobs.run_with_session(conn, job_id, backend, spec.prompt)
 
     if result.rate_limited:
-        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        jobs.record_rate_limit(
+            conn, job_id, lease_id, result.retry_after_seconds, provider=backend.name
+        )
         return "rate_limited"
 
     if result.is_error:
