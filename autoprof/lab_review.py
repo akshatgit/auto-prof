@@ -199,6 +199,10 @@ def _maybe_finalize(conn: sqlite3.Connection, lab_id: int, review_round: int, jo
         event_type = "lab_review_passed"
     else:
         event_type = "lab_review_failed"
+        # Without this the lab sits in pending_review with nothing queued
+        # and is never worked on again -- the dead end that stranded three
+        # labs simultaneously.
+        request_lab_revision(conn, lab_id)
 
     record_job_event(
         conn,
@@ -210,3 +214,134 @@ def _maybe_finalize(conn: sqlite3.Connection, lab_id: int, review_round: int, jo
         target_id=lab_id,
     )
     conn.commit()
+
+
+REVISE_PROMPT_TEMPLATE = """You are {name}, a professor in {field}. Your lab's root problem was \
+submitted to three independent reviewers and FAILED: it needs 2 of 3 strong_accept and did not \
+get them.
+
+Your current root problem:
+<root_problem>
+{root_problem}
+</root_problem>
+
+The reviewers said this. They did not see each other's reviews, so where two raise the same point \
+independently, treat it as certainly real:
+<reviews>
+{reviews}
+</reviews>
+
+Revise the root problem so it survives review, WITHOUT abandoning the research question that \
+motivated it. Specifically:
+
+- Fix every concrete defect they name -- undefined terms, unstated conventions, a prior result the \
+problem collapses into, a scope that no sequence of tasks could make progress on.
+- Do not simply narrow the ambition to make it safe. A problem watered down until it is trivially \
+tractable fails a different criterion.
+- If a reviewer shows your problem is already solved or follows from known work, that is real \
+information: re-centre on what genuinely remains open, and say what the known result settles.
+- Keep what was right. Do not rewrite passages nobody objected to.
+
+Respond with ONLY the revised root problem statement as plain prose. No preamble, no commentary \
+about what you changed.
+"""
+
+
+def request_lab_revision(conn: sqlite3.Connection, lab_id: int) -> int | None:
+    """Queue a professor revision after a failed review round.
+
+    Without this a failed lab review is a dead end: the lab sits in
+    `pending_review` with nothing queued and no work is ever dispatched
+    against it again. That is the same gap `student_revise_paper` closed
+    for rejected papers, one level up -- and it stranded three labs at
+    once before it existed.
+    """
+    lab = conn.execute("SELECT * FROM labs WHERE id = ?", (lab_id,)).fetchone()
+    if lab is None or lab["status"] != "pending_review":
+        return None
+    pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE kind='lab_revise' AND target_id=? "
+        "AND status IN ('pending','running')",
+        (lab_id,),
+    ).fetchone()["n"]
+    if pending:
+        return None
+    cur = conn.execute(
+        "INSERT INTO jobs (kind, target_type, target_id, status) "
+        "VALUES ('lab_revise', 'lab', ?, 'pending')",
+        (lab_id,),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def execute_lab_revise_job(
+    conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
+) -> str:
+    """Rewrite the root problem against the reviewers' objections, then
+    resubmit for a fresh round."""
+    lease_id = uuid.uuid4().hex
+    if not jobs.claim_job(conn, job_id, lease_id, lease_seconds=1800):
+        return "not_claimed"
+
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    lab = conn.execute("SELECT * FROM labs WHERE id = ?", (row["target_id"],)).fetchone()
+    if lab is None:
+        return jobs.fail_job(conn, job_id, lease_id, f"no lab with id={row['target_id']}")
+    if lab["status"] != "pending_review":
+        jobs.complete_job(conn, job_id, lease_id)
+        return "done"
+
+    professor = conn.execute(
+        "SELECT * FROM professors WHERE id = ?", (lab["professor_id"],)
+    ).fetchone()
+    reviews = conn.execute(
+        "SELECT * FROM reviews WHERE target_type='lab' AND target_id=? AND review_round=? "
+        "ORDER BY reviewer_index",
+        (lab["id"], lab["current_review_round"]),
+    ).fetchall()
+    if not reviews:
+        return jobs.fail_job(conn, job_id, lease_id, "no reviews to revise against")
+
+    parts = []
+    for review in reviews:
+        path = lab_dir / review["rationale_path"]
+        body = path.read_text(errors="replace") if path.exists() else "(rationale missing)"
+        parts.append(f"--- Reviewer {review['reviewer_index']} ({review['verdict']}) ---\n{body}")
+
+    result = jobs.run_with_session(
+        conn,
+        job_id,
+        backend,
+        REVISE_PROMPT_TEMPLATE.format(
+            name=professor["name"],
+            field=professor["field"],
+            root_problem=lab["root_problem"],
+            reviews="\n\n".join(parts),
+        ),
+    )
+
+    if result.rate_limited:
+        jobs.record_rate_limit(conn, job_id, lease_id, result.retry_after_seconds)
+        return "rate_limited"
+    if result.is_error:
+        return jobs.fail_job(conn, job_id, lease_id, result.error)
+    if len(result.text.split()) < 60:
+        return jobs.fail_job(
+            conn, job_id, lease_id,
+            f"revised root problem too short to be serious ({len(result.text.split())} words)",
+        )
+
+    try:
+        revise_root_problem(conn, lab["id"], result.text)
+    except LabReviewError as e:
+        return jobs.fail_job(conn, job_id, lease_id, str(e))
+
+    if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
+        return "not_claimed"
+    record_job_event(
+        conn, job_id=job_id, actor_type="professor", actor_id=professor["id"],
+        event_type="lab_revised", target_type="lab", target_id=lab["id"],
+    )
+    conn.commit()
+    return "done"

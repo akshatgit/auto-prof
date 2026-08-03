@@ -378,5 +378,186 @@ class HandlerCrashTests(unittest.TestCase):
         conn.close()
 
 
+class UnknownKindTests(unittest.TestCase):
+    """A daemon running code older than the job kind it is dispatching
+    must fail that job, not stop serving every lab."""
+
+    def test_unresolvable_backend_fails_only_that_job(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('a_kind_from_the_future', 'task', ?, 'pending')",
+            (ids["task_id"],),
+        )
+        job_id = cur.lastrowid
+        conn.commit()
+
+        class _Reg:
+            def get_backend(self, kind):
+                raise ValueError(f"unknown job kind: {kind!r}")
+
+        dispatched = daemon.dispatch_pending_jobs(
+            conn, _Reg(), {}, Path("/tmp"), budget_cap=2, special_handlers={},
+        )
+        self.assertEqual(dispatched, 1)
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("unknown job kind", row["last_error"])
+        conn.close()
+
+    def test_a_known_job_after_an_unknown_one_still_runs(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('a_kind_from_the_future', 'task', ?, 'pending')", (ids["task_id"],))
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_work', 'task', ?, 'pending')", (ids["task_id"],))
+        good = cur.lastrowid
+        conn.commit()
+        seen = []
+
+        class _Reg:
+            def get_backend(self, kind):
+                if kind == "student_work":
+                    return SimpleNamespace(name="fake")
+                raise ValueError(f"unknown job kind: {kind!r}")
+
+        daemon.dispatch_pending_jobs(
+            conn, _Reg(), {}, Path("/tmp"), budget_cap=5,
+            special_handlers={"student_work": lambda c, j, b, d: seen.append(j) or "done"},
+        )
+        self.assertEqual(seen, [good])
+        conn.close()
+
+
+class ConcurrentDispatchTests(unittest.TestCase):
+    """Correctness under concurrency comes from the lease protocol, not
+    from locking: claim_job is one atomic conditional UPDATE."""
+
+    class _Reg:
+        def get_backend(self, kind):
+            return SimpleNamespace(name="fake")
+
+    def _db(self, tmp, n_jobs):
+        from autoprof import db as db_module
+        path = Path(tmp) / "c.db"
+        conn = db_module.connect(path)
+        db_module.ensure_initialized(conn)
+        ids = seed_lab_with_student(conn)
+        for _ in range(n_jobs):
+            conn.execute(
+                "INSERT INTO jobs (kind, target_type, target_id, status) "
+                "VALUES ('student_work', 'task', ?, 'pending')",
+                (ids["task_id"],),
+            )
+        conn.commit()
+        return path, conn
+
+    def test_each_job_is_claimed_exactly_once(self):
+        """The failure this must rule out: two workers both running one
+        job and both writing its result."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 8)
+            seen, lock = [], threading.Lock()
+
+            def handler(conn_, job_id, backend, lab_dir):
+                from autoprof import jobs as jobs_module
+                lease = f"lease-{job_id}-{threading.get_ident()}"
+                if not jobs_module.claim_job(conn_, job_id, lease, 600):
+                    return "not_claimed"
+                with lock:
+                    seen.append(job_id)
+                jobs_module.complete_job(conn_, job_id, lease)
+                return "done"
+
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler},
+                workers=4, db_path=path,
+            )
+            self.assertEqual(len(seen), len(set(seen)), "a job ran twice")
+            self.assertEqual(len(seen), 8)
+            conn.close()
+
+    def test_work_actually_overlaps(self):
+        """Otherwise this is just a slower serial loop."""
+        import threading
+        import time as _time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 4)
+            active, peak, lock = 0, [0], threading.Lock()
+
+            def handler(conn_, job_id, backend, lab_dir):
+                nonlocal active
+                with lock:
+                    active += 1
+                    peak[0] = max(peak[0], active)
+                _time.sleep(0.25)
+                with lock:
+                    active -= 1
+                return "done"
+
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=4,
+                special_handlers={"student_work": handler},
+                workers=4, db_path=path,
+            )
+            self.assertGreater(peak[0], 1, "jobs did not run concurrently")
+            conn.close()
+
+    def test_one_worker_crashing_does_not_stop_the_others(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 4)
+            done = []
+
+            def handler(conn_, job_id, backend, lab_dir):
+                if job_id % 2 == 0:
+                    raise RuntimeError("worker exploded")
+                done.append(job_id)
+                return "done"
+
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=4,
+                special_handlers={"student_work": handler},
+                workers=4, db_path=path,
+            )
+            self.assertTrue(done)
+            failed = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status='failed'"
+            ).fetchone()[0]
+            self.assertGreater(failed, 0)
+            conn.close()
+
+    def test_concurrent_dispatch_requires_a_db_path(self):
+        """Each worker needs its own connection; a shared one would be
+        used across threads."""
+        conn = fresh_db()
+        with self.assertRaises(ValueError):
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path("/tmp"), budget_cap=2, workers=4, db_path=None,
+            )
+        conn.close()
+
+    def test_single_worker_keeps_the_serial_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 2)
+            order = []
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=2,
+                special_handlers={
+                    "student_work": lambda c, j, b, d: order.append(j) or "done"
+                },
+                workers=1,
+            )
+            self.assertEqual(len(order), 2)
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

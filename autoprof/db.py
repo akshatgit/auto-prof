@@ -19,6 +19,11 @@ LAB_DIR = REPO_ROOT / "lab"
 def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
+    # With concurrent workers, SQLite serialises writes; without a busy
+    # timeout a writer that finds the lock held fails instantly with
+    # "database is locked" rather than waiting the few milliseconds a
+    # write actually takes. Reads are unaffected (WAL).
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.row_factory = sqlite3.Row
     return conn
 

@@ -8,8 +8,10 @@ themselves).
 import fcntl
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import db as db_module
 from . import jobs
 from .runner import execute_job
 
@@ -110,6 +112,39 @@ def _fail_unhandled(conn: sqlite3.Connection, job_id: int, error: Exception) -> 
     return "failed"
 
 
+def _execute_one(
+    db_path, job_id: int, kind: str, registry, prompt_builders, lab_dir, special_handlers
+) -> str:
+    """Run one job on its own connection.
+
+    Its OWN connection because sqlite3 connections are not safe to share
+    across threads. Correctness under concurrency comes from the lease
+    protocol, not from locking: claim_job is a single atomic conditional
+    UPDATE, so if two workers reach for the same job exactly one wins and
+    the loser gets 'not_claimed'.
+    """
+    conn = db_module.connect(db_path)
+    try:
+        try:
+            backend = registry.get_backend(kind)
+        except Exception as e:  # noqa: BLE001
+            _fail_unhandled(conn, job_id, e)
+            return "failed"
+
+        if _provider_blocked(conn, backend.name):
+            return "not_claimed"
+
+        handler = special_handlers.get(kind)
+        if handler is not None:
+            try:
+                return handler(conn, job_id, backend, lab_dir)
+            except Exception as e:  # noqa: BLE001
+                return _fail_unhandled(conn, job_id, e)
+        return execute_job(conn, job_id, backend, prompt_builders, lab_dir)
+    finally:
+        conn.close()
+
+
 def dispatch_pending_jobs(
     conn: sqlite3.Connection,
     registry,
@@ -117,6 +152,8 @@ def dispatch_pending_jobs(
     lab_dir: Path,
     budget_cap: int,
     special_handlers: dict | None = None,
+    workers: int = 1,
+    db_path=None,
 ) -> int:
     """Dispatch up to `budget_cap` eligible pending jobs this tick.
     Provider-blocked jobs and jobs skipped for any other reason don't
@@ -143,11 +180,37 @@ def dispatch_pending_jobs(
         (max(budget_cap * 4, budget_cap),),
     ).fetchall()
 
+    if workers > 1:
+        if db_path is None:
+            raise ValueError("concurrent dispatch needs db_path so each worker can connect")
+        chosen = candidate_rows[:budget_cap]
+        if not chosen:
+            return 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = list(pool.map(
+                lambda row: _execute_one(
+                    db_path, row["id"], row["kind"], registry,
+                    prompt_builders, lab_dir, special_handlers,
+                ),
+                chosen,
+            ))
+        return sum(1 for outcome in outcomes if outcome != "not_claimed")
+
     for candidate in candidate_rows:
         if dispatched >= budget_cap:
             break
 
-        backend = registry.get_backend(candidate["kind"])
+        # Resolving a backend can fail on its own -- an unknown job kind
+        # raises here, BEFORE the handler guard below. A daemon running
+        # code older than the kind it is dispatching hits exactly this,
+        # and it used to take the whole loop down with it.
+        try:
+            backend = registry.get_backend(candidate["kind"])
+        except Exception as e:  # noqa: BLE001 -- one job's problem, not the loop's
+            _fail_unhandled(conn, candidate["id"], e)
+            dispatched += 1
+            continue
+
         if _provider_blocked(conn, backend.name):
             continue
 
@@ -178,10 +241,13 @@ def run_tick(
     lab_dir: Path,
     budget_cap: int,
     special_handlers: dict | None = None,
+    workers: int = 1,
+    db_path=None,
 ) -> dict:
     reclaimed = jobs.reclaim_expired_leases(conn)
     dispatched = dispatch_pending_jobs(
-        conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers
+        conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers,
+        workers=workers, db_path=db_path,
     )
     return {"reclaimed": reclaimed, "dispatched": dispatched}
 
@@ -198,6 +264,8 @@ def run_daemon(
     max_ticks: int | None = None,
     special_handlers: dict | None = None,
     on_tick=None,
+    workers: int = 1,
+    db_path=None,
 ) -> None:
     """The tick loop from docs/DESIGN.md §5. `once=True` runs a single
     tick and returns (used for `autoprof daemon run --once` and for
@@ -212,7 +280,10 @@ def run_daemon(
     """
     ticks = 0
     while True:
-        stats = run_tick(conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers)
+        stats = run_tick(
+            conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers,
+            workers=workers, db_path=db_path,
+        )
         ticks += 1
 
         last = once or (max_ticks is not None and ticks >= max_ticks)

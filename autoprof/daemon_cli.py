@@ -7,7 +7,7 @@ from . import db
 from .backends.registry import default_registry
 from .daemon import SingleInstanceLock, run_daemon
 from .decompose import execute_professor_decompose_job
-from .lab_review import execute_lab_review_job
+from .lab_review import execute_lab_review_job, execute_lab_revise_job
 from .callback import execute_professor_callback_job
 from .collaboration import (
     execute_collaboration_round_job,
@@ -37,6 +37,7 @@ from .prompt_builders import default_builders
 # like memory_compact.
 SPECIAL_HANDLERS = {
     "lab_review": execute_lab_review_job,
+    "lab_revise": execute_lab_revise_job,
     "professor_decompose": execute_professor_decompose_job,
     "student_work": execute_student_work_job,
     "student_write_paper": execute_student_write_paper_job,
@@ -81,6 +82,7 @@ def _cmd_run(args) -> int:
 
     try:
         mode = "single tick" if args.once else f"loop (interval={args.interval}s)"
+        mode += f", {args.workers} worker(s)"
         print(f"autoprof daemon starting ({mode}, budget={args.budget}/tick)", flush=True)
         run_daemon(
             conn,
@@ -93,6 +95,8 @@ def _cmd_run(args) -> int:
             max_ticks=args.max_ticks,
             special_handlers=SPECIAL_HANDLERS,
             on_tick=_log_tick,
+            workers=args.workers,
+            db_path=args.db_path,
         )
     except KeyboardInterrupt:
         print("\nautoprof daemon stopping (Ctrl-C)")
@@ -120,6 +124,11 @@ def add_subparser(subparsers) -> None:
     )
     run_p.add_argument(
         "--budget", type=int, default=10, help="Max jobs dispatched per tick."
+    )
+    run_p.add_argument(
+        "--workers", type=int, default=1,
+        help="Jobs to run CONCURRENTLY. Each worker gets its own DB connection; "
+             "correctness comes from the lease protocol, not from locking.",
     )
     run_p.add_argument(
         "--once", action="store_true", help="Run exactly one tick, then exit."

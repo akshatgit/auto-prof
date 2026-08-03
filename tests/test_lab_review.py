@@ -248,5 +248,84 @@ class ReviseRootProblemTests(unittest.TestCase):
         conn.close()
 
 
+class AutoRevisionTests(unittest.TestCase):
+    """A failed lab review used to be a dead end: the lab sat in
+    pending_review with nothing queued, and three labs stranded at once
+    before this existed."""
+
+    def _fail_a_round(self, conn, lab_dir):
+        ids = _seed_lab(conn)
+        job_ids = lab_review.request_lab_review(conn, ids["lab_id"])
+        backend = ScriptedBackend([BackendResult(text="rationale\nVERDICT: accept")] * 3)
+        for job_id in job_ids:
+            lab_review.execute_lab_review_job(conn, job_id, backend, lab_dir)
+        return ids
+
+    def test_failed_review_queues_a_revision(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            ids = self._fail_a_round(conn, Path(d))
+        rows = conn.execute("SELECT * FROM jobs WHERE kind='lab_revise'").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target_id"], ids["lab_id"])
+        conn.close()
+
+    def test_passing_review_queues_no_revision(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            ids = _seed_lab(conn)
+            job_ids = lab_review.request_lab_review(conn, ids["lab_id"])
+            backend = ScriptedBackend([BackendResult(text="VERDICT: strong_accept")] * 3)
+            for job_id in job_ids:
+                lab_review.execute_lab_review_job(conn, job_id, backend, Path(d))
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='lab_revise'").fetchone()[0], 0
+        )
+        conn.close()
+
+    def test_revision_rewrites_the_problem_and_starts_a_new_round(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            ids = self._fail_a_round(conn, lab_dir)
+            job_id = conn.execute(
+                "SELECT id FROM jobs WHERE kind='lab_revise'"
+            ).fetchone()["id"]
+            revised = "a sharper root problem " * 40
+            lab_review.execute_lab_revise_job(
+                conn, job_id, ScriptedBackend([BackendResult(text=revised)]), lab_dir
+            )
+
+        lab = conn.execute("SELECT * FROM labs WHERE id=?", (ids["lab_id"],)).fetchone()
+        self.assertIn("sharper root problem", lab["root_problem"])
+        self.assertEqual(lab["current_review_round"], 2)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='lab_review' AND review_round=2"
+            ).fetchone()[0],
+            3,
+        )
+        conn.close()
+
+    def test_a_trivially_short_revision_is_refused(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            self._fail_a_round(conn, lab_dir)
+            job_id = conn.execute("SELECT id FROM jobs WHERE kind='lab_revise'").fetchone()["id"]
+            outcome = lab_review.execute_lab_revise_job(
+                conn, job_id, ScriptedBackend([BackendResult(text="try again")]), lab_dir
+            )
+        self.assertIn(outcome, ("retrying", "failed"))
+        conn.close()
+
+    def test_not_queued_twice(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            ids = self._fail_a_round(conn, Path(d))
+        self.assertIsNone(lab_review.request_lab_revision(conn, ids["lab_id"]))
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
