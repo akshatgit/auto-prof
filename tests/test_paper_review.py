@@ -66,6 +66,19 @@ class BuildReviewPromptTests(unittest.TestCase):
         self.assertNotIn("auto-prof review rubric", prompt)
         self.assertIn("VERDICT:", prompt)
 
+    def test_carries_the_kill_mandate(self):
+        # Papers here passed by outlasting the panel, not by being good:
+        # 0 of 18 strong_accepts in round 1, 10 of 15 by round 4. The
+        # rubric must instruct an attack, demand a falsification test, and
+        # say outright that surviving revision rounds is not a reason to
+        # soften -- a reviewer with no memory of prior rounds otherwise
+        # reads a well-patched paper as a strong one.
+        prompt = paper_review.build_review_prompt("<h1>Doc</h1>")
+        self.assertIn("kill", prompt.lower())
+        self.assertIn("counterexample", prompt.lower())
+        self.assertIn("falsif", prompt.lower())
+        self.assertIn("Revision is not a reason to soften", prompt)
+
 
 class RequestPaperReviewTests(unittest.TestCase):
     def test_enqueues_three_jobs_for_the_current_round(self):
