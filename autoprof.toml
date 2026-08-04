@@ -3,9 +3,24 @@
 # > per-kind override below > category env var > category default below >
 # hardcoded fallback).
 
+[backends]
+# Which Ollama model runs generation. Was a hardcoded constant in
+# ollama_cloud.py, so the model that wrote every paper in this system was
+# invisible to the config. Chosen on evidence: deepseek-v4-pro tied for
+# top score on a machine-scored probe set drawn from the failures
+# reviewers actually caught (refusing a false lemma, producing a required
+# table, honouring hard constraints) and was the fastest of the models
+# that tied, at ~10s mean against the previous default's ~15s.
+# AUTOPROF_OLLAMA_MODEL overrides this.
+ollama_model = "deepseek-v4-pro"
+
 [backends.default]
 generation = "ollama_cloud"   # student work, professor decompose/callback, memory compaction
 review = "codex"              # independent paper/defense review (docs/DESIGN.md §4)
+# Generation deliberately stays off codex even though codex is stronger:
+# the review panel is codex+claude, so codex-written papers would be
+# judged two-thirds by their own model family. Reviewer independence
+# across families is the load-bearing assumption (see review_panel below).
 
 # Uncomment to pin a specific job kind to a specific backend, e.g. to run
 # defense review on a different model than paper review:

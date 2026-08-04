@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autoprof.backends import registry
 from autoprof.backends.registry import (
     DEFAULT_BACKEND_FOR_CATEGORY,
     Registry,
@@ -141,3 +142,37 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OllamaModelSelectionTests(unittest.TestCase):
+    """The model was a hardcoded class default, so the model that wrote
+    every paper in this system was invisible to the config and could not
+    be changed without editing source."""
+
+    def test_defaults_to_the_class_default_when_unconfigured(self):
+        self.assertEqual(registry.backend_options("ollama_cloud", {}, {}), {})
+
+    def test_config_selects_the_model(self):
+        opts = registry.backend_options(
+            "ollama_cloud", {"backends": {"ollama_model": "deepseek-v4-pro"}}, {}
+        )
+        self.assertEqual(opts, {"model": "deepseek-v4-pro"})
+
+    def test_env_beats_config(self):
+        opts = registry.backend_options(
+            "ollama_cloud",
+            {"backends": {"ollama_model": "from-config"}},
+            {"AUTOPROF_OLLAMA_MODEL": "from-env"},
+        )
+        self.assertEqual(opts, {"model": "from-env"})
+
+    def test_other_backends_take_no_model_kwarg(self):
+        # codex and claude take no `model=` in this position; passing one
+        # would raise at construction.
+        self.assertEqual(
+            registry.backend_options("codex", {"backends": {"ollama_model": "x"}}, {}), {}
+        )
+
+    def test_registry_threads_the_model_into_the_instance(self):
+        reg = registry.Registry(config={"backends": {"ollama_model": "deepseek-v4-pro"}}, env={})
+        self.assertEqual(reg.get_backend("student_work").model, "deepseek-v4-pro")

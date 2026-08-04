@@ -114,6 +114,22 @@ def resolve_backend_name(
     return DEFAULT_BACKEND_FOR_CATEGORY[category]
 
 
+def backend_options(name: str, config: dict, env: dict) -> dict:
+    """Constructor kwargs for one backend.
+
+    The Ollama model was a hardcoded class default with no way to
+    override it, so every paper this system has written came from
+    whichever model that constant happened to name -- a choice nobody
+    could see in the config and nobody could change without editing
+    source. Same precedence as everything else here: env, then config,
+    then the class default.
+    """
+    if name != "ollama_cloud":
+        return {}
+    model = env.get("AUTOPROF_OLLAMA_MODEL") or config.get("backends", {}).get("ollama_model")
+    return {"model": model} if model else {}
+
+
 def load_config(path: Path | None) -> dict:
     if path is None:
         return {}
@@ -145,7 +161,7 @@ class Registry:
                     f"unknown backend {name!r} configured for job kind {kind!r} "
                     f"(known backends: {sorted(self.backend_classes)})"
                 )
-            self._instances[name] = cls()
+            self._instances[name] = cls(**backend_options(name, self.config, self.env))
         return self._instances[name]
 
 
