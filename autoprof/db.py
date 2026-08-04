@@ -115,7 +115,7 @@ _ADDITIVE_TABLES = (
             lab_id      INTEGER NOT NULL REFERENCES labs(id),
             task_id     INTEGER REFERENCES tasks(id),
             student_id  INTEGER REFERENCES students(id),
-            tool        TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch', 'fetch')),
+            tool        TEXT NOT NULL,
             input_path  TEXT NOT NULL,
             output_path TEXT NOT NULL,
             status      TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
@@ -284,30 +284,41 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         )
 
     _apply_missing_tables(conn)
-    _drop_tasks_direction_check(conn)
+    for spec in _CHECK_REBUILDS:
+        _drop_check_constraint(conn, *spec)
     conn.commit()
 
 
-def _drop_tasks_direction_check(conn: sqlite3.Connection) -> None:
-    """Rebuild `tasks` to remove the CHECK on `direction`.
+def _drop_check_constraint(conn, table, marker, ddl, indexes_and_triggers) -> None:
+    """Rebuild `table` without a CHECK constraint SQLite cannot alter.
 
-    SQLite cannot alter a CHECK constraint, so a DB created before
-    'implement' joined the vocabulary keeps rejecting it forever while
-    docs/schema.sql says otherwise and every test passes. That divergence
-    already bit us once as jobs.status ('cancelled' is documented and the
-    deployed constraint refuses it), so the fix here removes the
-    constraint rather than widening it: decompose.VALID_DIRECTIONS is the
-    authority and the vocabulary can grow again without another rebuild.
+    SQLite cannot alter a CHECK, so the moment a vocabulary in
+    docs/schema.sql grows, that file and the deployed table drift apart
+    silently -- every test passes, and the drift surfaces only when
+    something finally uses a new value, in production. This has now
+    happened three times:
 
-    Rewriting a table that seven foreign keys point at is the one
-    genuinely dangerous migration in this file, so it is conditional --
-    it runs once, on a DB that still has the old constraint, and never
-    again.
+      jobs.status    -- 'cancelled' documented, deployed table refuses it
+      tasks.direction-- 'implement' documented, deployed table refuses it
+      tool_runs.tool -- deployed table frozen at ('verify','visualize'),
+                        which every mathematics task satisfied and every
+                        implement task violated on its first tool call
+
+    So these vocabularies lose their CHECK and are enforced in code, where
+    they can change without touching a database.
+
+    Conditional and idempotent: it runs once, on a table that still has
+    the old constraint, and never again. Rewriting a table other tables
+    point at is the one genuinely dangerous operation in this file.
+
+    `marker` is the substring identifying the stale constraint, `ddl` the
+    replacement CREATE TABLE, and `indexes_and_triggers` the objects the
+    drop takes with it.
     """
-    ddl = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
-    if ddl is None or "CHECK (direction IN" not in ddl[0]:
+    if row is None or marker not in row[0]:
         return
 
     # PRAGMAs cannot run inside a transaction, and foreign_keys must be off
@@ -329,43 +340,25 @@ def _drop_tasks_direction_check(conn: sqlite3.Connection) -> None:
     # escape for the 12-step rebuild procedure: it makes RENAME a rename
     # rather than a schema-wide rewrite.
     conn.execute("PRAGMA legacy_alter_table=ON")
+    tmp = f"{table}_rebuilt"
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    collist = ", ".join(cols)
     try:
         conn.execute("BEGIN")
-        conn.execute(
-            """CREATE TABLE tasks_rebuilt (
-                id                  INTEGER PRIMARY KEY,
-                lab_id              INTEGER NOT NULL REFERENCES labs(id),
-                parent_task_id      INTEGER REFERENCES tasks(id),
-                title               TEXT NOT NULL,
-                brief_path          TEXT NOT NULL,
-                direction           TEXT NOT NULL,
-                end_criteria        TEXT NOT NULL,
-                status              TEXT NOT NULL CHECK (status IN
-                                        ('open', 'in_progress', 'pending_prof_review',
-                                         'completed', 'abandoned')),
-                assigned_student_id INTEGER REFERENCES students(id),
-                created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
-            )"""
-        )
-        # Explicit column list, and ids copied verbatim: every referencing
-        # row identifies its task by id, so a renumbering here would
-        # silently repoint 17 students and 35 papers at the wrong work.
-        conn.execute(
-            "INSERT INTO tasks_rebuilt (id, lab_id, parent_task_id, title, brief_path, "
-            "direction, end_criteria, status, assigned_student_id, created_at, updated_at) "
-            "SELECT id, lab_id, parent_task_id, title, brief_path, direction, end_criteria, "
-            "status, assigned_student_id, created_at, updated_at FROM tasks"
-        )
-        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-        after = conn.execute("SELECT COUNT(*) FROM tasks_rebuilt").fetchone()[0]
+        conn.execute(ddl.format(tmp=tmp))
+        # Explicit column list, and ids copied verbatim: referencing rows
+        # identify their row by id, so renumbering here would silently
+        # repoint them at different work.
+        conn.execute(f"INSERT INTO {tmp} ({collist}) SELECT {collist} FROM {table}")
+        before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        after = conn.execute(f"SELECT COUNT(*) FROM {tmp}").fetchone()[0]
         if before != after:
-            raise RuntimeError(f"tasks rebuild lost rows: {before} -> {after}")
+            raise RuntimeError(f"{table} rebuild lost rows: {before} -> {after}")
 
-        conn.execute("DROP TABLE tasks")
-        conn.execute("ALTER TABLE tasks_rebuilt RENAME TO tasks")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
         # Dropping the table dropped its indexes and triggers with it.
-        for stmt in _TASKS_INDEXES_AND_TRIGGERS:
+        for stmt in indexes_and_triggers:
             conn.execute(stmt)
         conn.commit()
     except Exception:
@@ -378,13 +371,17 @@ def _drop_tasks_direction_check(conn: sqlite3.Connection) -> None:
     broken = conn.execute("PRAGMA foreign_key_check").fetchall()
     if len(broken) > broken_before:
         raise RuntimeError(
-            f"tasks rebuild broke foreign keys: {broken_before} violations before, "
+            f"{table} rebuild broke foreign keys: {broken_before} violations before, "
             f"{len(broken)} after"
         )
 
 
 # Recreated after the rebuild drops `tasks`. Copies of the corresponding
 # blocks in docs/schema.sql.
+_TOOL_RUNS_INDEXES = (
+    "CREATE INDEX idx_tool_runs_task ON tool_runs(task_id, created_at)",
+)
+
 _TASKS_INDEXES_AND_TRIGGERS = (
     "CREATE INDEX idx_tasks_lab ON tasks(lab_id)",
     "CREATE INDEX idx_tasks_status ON tasks(status)",
@@ -409,6 +406,44 @@ _TASKS_INDEXES_AND_TRIGGERS = (
         UPDATE students SET task_id = NULL, status = 'unassigned'
         WHERE id = NEW.assigned_student_id;
     END""",
+)
+
+
+_TASKS_DDL = """CREATE TABLE {tmp} (
+    id                  INTEGER PRIMARY KEY,
+    lab_id              INTEGER NOT NULL REFERENCES labs(id),
+    parent_task_id      INTEGER REFERENCES tasks(id),
+    title               TEXT NOT NULL,
+    brief_path          TEXT NOT NULL,
+    direction           TEXT NOT NULL,
+    end_criteria        TEXT NOT NULL,
+    status              TEXT NOT NULL CHECK (status IN
+                            ('open', 'in_progress', 'pending_prof_review',
+                             'completed', 'abandoned')),
+    assigned_student_id INTEGER REFERENCES students(id),
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+_TOOL_RUNS_DDL = """CREATE TABLE {tmp} (
+    id          INTEGER PRIMARY KEY,
+    lab_id      INTEGER NOT NULL REFERENCES labs(id),
+    task_id     INTEGER REFERENCES tasks(id),
+    student_id  INTEGER REFERENCES students(id),
+    tool        TEXT NOT NULL,
+    input_path  TEXT NOT NULL,
+    output_path TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('ok', 'error', 'timeout')),
+    summary     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+# (table, substring identifying the stale CHECK, replacement DDL, objects
+# the DROP takes with it). Each entry runs once, on a database that still
+# carries the constraint.
+_CHECK_REBUILDS = (
+    ("tasks", "CHECK (direction IN", _TASKS_DDL, _TASKS_INDEXES_AND_TRIGGERS),
+    ("tool_runs", "CHECK (tool IN", _TOOL_RUNS_DDL, _TOOL_RUNS_INDEXES),
 )
 
 

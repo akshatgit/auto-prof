@@ -253,7 +253,15 @@ CREATE TABLE tool_runs (
     lab_id     INTEGER NOT NULL REFERENCES labs(id),
     task_id    INTEGER REFERENCES tasks(id),
     student_id INTEGER REFERENCES students(id),
-    tool       TEXT NOT NULL CHECK (tool IN ('verify', 'visualize', 'readfile', 'propose_patch', 'apply_patch', 'fetch')),
+    -- 'verify' | 'visualize' | 'readfile' | 'propose_patch' | 'apply_patch'
+    -- | 'fetch' | 'experiment' | 'record'. No CHECK, for the same reason
+    -- tasks.direction has none: SQLite cannot alter one, so this list and
+    -- the deployed table drift apart silently and the drift only surfaces
+    -- when someone finally uses the new value. It surfaced here as a
+    -- deployed constraint still frozen at ('verify','visualize') -- which
+    -- every mathematics task satisfied and every implement task violated
+    -- on its first tool call. tools._TOOL_BLOCK_RE is the authority.
+    tool       TEXT NOT NULL,
     -- The program or chart spec the student supplied, and what came back.
     input_path  TEXT NOT NULL,
     output_path TEXT NOT NULL,

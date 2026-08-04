@@ -154,3 +154,70 @@ class TasksDirectionRebuildTests(unittest.TestCase):
             conn.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone()[0], ddl
         )
         conn.close()
+
+
+class ToolRunsCheckRebuildTests(unittest.TestCase):
+    """Third instance of the same divergence. The deployed constraint was
+    frozen at ('verify','visualize'): every mathematics task satisfied it,
+    and every implement task violated it on its first tool call, so lab #6
+    could not do the work it was created for."""
+
+    def _legacy_db(self):
+        conn = db.connect(":memory:")
+        db.ensure_initialized(conn)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE tool_runs")
+        conn.execute(
+            "CREATE TABLE tool_runs (id INTEGER PRIMARY KEY, lab_id INTEGER NOT NULL "
+            "REFERENCES labs(id), task_id INTEGER REFERENCES tasks(id), student_id INTEGER "
+            "REFERENCES students(id), tool TEXT NOT NULL CHECK (tool IN ('verify','visualize')), "
+            "input_path TEXT NOT NULL, output_path TEXT NOT NULL, status TEXT NOT NULL "
+            "CHECK (status IN ('ok','error','timeout')), summary TEXT, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        for stmt in db._TOOL_RUNS_INDEXES:
+            conn.execute(stmt)
+        conn.execute(
+            "INSERT INTO professors (lab_id, name, field, status, memory_path) "
+            "VALUES (NULL, 'P', 'F', 'active', 'm.md')"
+        )
+        conn.execute(
+            "INSERT INTO labs (professor_id, root_problem, status) VALUES (1, 'rp', 'active')"
+        )
+        conn.execute(
+            "INSERT INTO tool_runs (lab_id, tool, input_path, output_path, status) "
+            "VALUES (1, 'verify', 'i', 'o', 'ok')"
+        )
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+        return conn
+
+    def test_legacy_db_rejects_the_tools_an_implement_task_needs(self):
+        conn = self._legacy_db()
+        for tool in ("readfile", "apply_patch", "record"):
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO tool_runs (lab_id, tool, input_path, output_path, status) "
+                    "VALUES (1, ?, 'i', 'o', 'ok')",
+                    (tool,),
+                )
+        conn.close()
+
+    def test_rebuild_accepts_every_tool_the_parser_emits(self):
+        from autoprof import tools
+
+        conn = self._legacy_db()
+        db.ensure_initialized(conn)
+        emitted = tools._TOOL_BLOCK_RE.pattern.split("tool:(")[1].split(")")[0].split("|")
+        for tool in emitted:
+            conn.execute(
+                "INSERT INTO tool_runs (lab_id, tool, input_path, output_path, status) "
+                "VALUES (1, ?, 'i', 'o', 'ok')",
+                (tool,),
+            )
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        # the pre-existing row survived the rebuild, with its id
+        self.assertEqual(
+            conn.execute("SELECT tool FROM tool_runs WHERE id=1").fetchone()[0], "verify"
+        )
+        conn.close()
