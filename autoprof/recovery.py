@@ -44,7 +44,14 @@ _PATTERNS = (
     (MODEL_CAPACITY, r"rate.?limit|usage limit|429|context (length|window)|token limit|out of tokens|quota"),
     (CONFIG, r"not found on path|no such file|permission denied|unauthor|invalid.{0,12}(key|credential)|not configured"),
     (MODEL_OUTPUT, r"no verdict line|unusable|not an html document|produced no output|empty .*output|expected json|unparse|missing required keys|verdict .* not one of"),
-    (WORKER, r"timed out|timeout|killed|broken pipe|connection reset"),
+    # Provider-side 5xx is the canonical transient failure and had no
+    # pattern, so it fell through to UNKNOWN -- two quick attempts, then
+    # dead. A burst of Ollama 500s killed four of lab #6's five tasks
+    # inside one outage window; the backend was healthy again minutes
+    # later and nothing ever retried.
+    (WORKER, r"timed out|timeout|killed|broken pipe|connection reset"
+             r"|http 5\d\d|internal server error|service unavailable|bad gateway"
+             r"|gateway time-?out|temporarily unavailable|overloaded"),
     (STATE_CONFLICT, r"no longer exists|is now on round|has no assigned student|missing:|no (task|paper|lab|professor) with id"),
     (TASK_LOGIC, r"has no reviews to revise|cannot be completed"),
 )

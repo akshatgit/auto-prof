@@ -83,6 +83,37 @@ class StallWarningTests(unittest.TestCase):
         self.assertIsNone(watch_cli.stall_warning(conn, quiet_seconds=99999, threshold=1800))
         conn.close()
 
+    def test_warns_when_a_task_is_in_progress_with_nothing_queued(self):
+        # The shape the original warning could not see. When the last job
+        # for a task fails, nothing enqueues another: the task stays
+        # in_progress, its student stays 'working', and the queue is
+        # empty -- identical to a healthy idle system. A burst of provider
+        # 500s stranded all five of lab #6's tasks this way, silently,
+        # because every alarm here required pending > 0.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        conn.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id=?", (ids["task_id"],)
+        )
+        conn.commit()
+        warning = watch_cli.stall_warning(conn, quiet_seconds=3600, threshold=1800)
+        self.assertIsNotNone(warning)
+        self.assertIn("stranded", warning)
+        conn.close()
+
+    def test_an_in_progress_task_with_a_queued_job_is_not_stranded(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        conn.execute(
+            "UPDATE tasks SET status='in_progress' WHERE id=?", (ids["task_id"],)
+        )
+        conn.commit()
+        self._queued_job(conn, ids)
+        warning = watch_cli.stall_warning(conn, quiet_seconds=3600, threshold=1800)
+        self.assertIn("daemon may be down", warning)
+        self.assertNotIn("stranded", warning)
+        conn.close()
+
     def test_no_warning_before_the_threshold(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)

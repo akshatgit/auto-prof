@@ -88,15 +88,35 @@ def stall_warning(conn, quiet_seconds: float, threshold: float) -> str | None:
     """
     if quiet_seconds < threshold:
         return None
+    minutes = int(quiet_seconds // 60)
     pending = conn.execute(
         "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending', 'running')"
     ).fetchone()["n"]
-    if not pending:
-        return None
-    return (
-        f"NOTHING has completed in {int(quiet_seconds // 60)} min while {pending} job(s) are "
-        "queued -- the daemon may be down. Check `screen -r autoprof-daemon`."
-    )
+    if pending:
+        return (
+            f"NOTHING has completed in {minutes} min while {pending} job(s) are "
+            "queued -- the daemon may be down. Check `screen -r autoprof-daemon`."
+        )
+
+    # The opposite shape, and the one this warning could not see: work in
+    # progress with NOTHING queued for it. When the last job for a task
+    # fails, nothing enqueues another -- the task stays in_progress, its
+    # student stays 'working', and the queue is empty, which is
+    # indistinguishable from a healthy idle system. A burst of provider
+    # 500s stranded all five of lab #6's tasks exactly this way and no
+    # alarm could fire, because every alarm here required pending > 0.
+    stranded = conn.execute(
+        "SELECT COUNT(*) AS n FROM tasks t WHERE t.status = 'in_progress' "
+        "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.status IN ('pending','running') "
+        "AND j.target_type = 'task' AND j.target_id = t.id)"
+    ).fetchone()["n"]
+    if stranded:
+        return (
+            f"{stranded} task(s) are in_progress with NO job queued and nothing has "
+            f"completed in {minutes} min -- they are stranded, not idle. Check "
+            "`autoprof status` and re-enqueue their work."
+        )
+    return None
 
 
 def _cmd_watch(args) -> int:
