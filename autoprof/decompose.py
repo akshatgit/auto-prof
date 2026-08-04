@@ -29,7 +29,11 @@ from .jsonio import extract_json_object
 # callers and tests that referenced it directly.
 MAX_TASKS_PER_DECOMPOSITION = config.DEFAULT_MAX_TASKS_PER_DECOMPOSITION
 
-VALID_DIRECTIONS = ("prove", "disprove", "open")
+# The authority on what a direction may be -- tasks.direction carries no
+# CHECK constraint, because SQLite cannot alter one without a table
+# rebuild and the deployed schema then diverges from docs/schema.sql
+# unnoticed.
+VALID_DIRECTIONS = ("prove", "disprove", "open", "implement")
 
 DECOMPOSE_PROMPT_TEMPLATE = """You are {name}, a professor in {field}, leading a research lab.
 
@@ -47,9 +51,13 @@ enough that you could later judge it "resolved" or not.
 
 For each task give:
 - "title": a short, specific title.
-- "direction": exactly one of "prove", "disprove", or "open" -- what you are asking the \
-student to attempt. Use "open" only for genuinely exploratory tasks where you are not \
-asserting which way the answer goes.
+- "direction": exactly one of "prove", "disprove", "open", or "implement" -- what you are \
+asking the student to attempt. Use "open" only for genuinely exploratory tasks where you \
+are not asserting which way the answer goes. Use "implement" when the deliverable is a \
+working artifact and evidence about its behaviour -- a tool, a mechanism, a change to a \
+system -- rather than an argument: an implement task is resolved by the artifact existing, \
+doing what was claimed, and being measured, not by a proof. Do not label an engineering \
+task "prove"; a student told to prove a monitor will try to, and fail.
 - "end_criteria": what would make this task resolved. Be concrete about what would count \
 as success, and what would count as a negative result that still closes the task.
 - "brief": 2-4 paragraphs the assigned student will read as their full instructions -- \
@@ -207,8 +215,15 @@ def execute_professor_decompose_job(
     # Guard against a second decomposition piling duplicate tasks onto a
     # lab that already has them -- a retry after a partially-applied run,
     # or a manually re-enqueued job.
+    #
+    # Abandoned tasks do not count. They are not live work, and treating
+    # them as a block leaves a lab whose whole decomposition was discarded
+    # permanently unable to produce another one -- with deleting the rows
+    # as the only way out, which reuses their ids and silently repoints
+    # every job and event that referenced them.
     existing = conn.execute(
-        "SELECT COUNT(*) AS n FROM tasks WHERE lab_id = ?", (lab["id"],)
+        "SELECT COUNT(*) AS n FROM tasks WHERE lab_id = ? AND status != 'abandoned'",
+        (lab["id"],),
     ).fetchone()["n"]
     if existing > 0:
         jobs.complete_job(conn, job_id, lease_id)

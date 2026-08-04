@@ -68,6 +68,11 @@ result -- not a plan for getting one. Specifically:
 
 - If the task direction is "prove" or "disprove", construct the actual argument, in full, \
 with every step checkable. State every assumption you rely on.
+- If the task direction is "implement", the deliverable is the artifact and evidence about \
+it, not an argument: build the thing, land it, and report what it does with measurements \
+taken before and after. A proof of a piece of software is a category error; so is a design \
+document with nothing built. Where a claim about the artifact's behaviour is finite and \
+checkable, check it by running it and report what came back.
 - Do not assert a result you have not derived. A rigorous negative result, or a precisely \
 characterised partial result with the obstruction identified, is worth far more here than \
 an overclaimed positive one -- your work will be reviewed by independent reviewers who \

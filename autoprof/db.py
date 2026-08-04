@@ -284,7 +284,132 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         )
 
     _apply_missing_tables(conn)
+    _drop_tasks_direction_check(conn)
     conn.commit()
+
+
+def _drop_tasks_direction_check(conn: sqlite3.Connection) -> None:
+    """Rebuild `tasks` to remove the CHECK on `direction`.
+
+    SQLite cannot alter a CHECK constraint, so a DB created before
+    'implement' joined the vocabulary keeps rejecting it forever while
+    docs/schema.sql says otherwise and every test passes. That divergence
+    already bit us once as jobs.status ('cancelled' is documented and the
+    deployed constraint refuses it), so the fix here removes the
+    constraint rather than widening it: decompose.VALID_DIRECTIONS is the
+    authority and the vocabulary can grow again without another rebuild.
+
+    Rewriting a table that seven foreign keys point at is the one
+    genuinely dangerous migration in this file, so it is conditional --
+    it runs once, on a DB that still has the old constraint, and never
+    again.
+    """
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if ddl is None or "CHECK (direction IN" not in ddl[0]:
+        return
+
+    # PRAGMAs cannot run inside a transaction, and foreign_keys must be off
+    # for the drop-and-rename: with it on, dropping `tasks` would cascade
+    # or abort against students/papers/supervisions rows pointing at it.
+    was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    # Differential, not absolute: a database can carry a dangling
+    # reference from before this ran, and refusing to start over damage
+    # the rebuild did not cause would be a worse failure than the one
+    # being guarded against.
+    broken_before = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    # Triggers on OTHER tables reference `tasks` -- trg_students_task_assign_insert
+    # is one. Modern SQLite re-validates every trigger body during ALTER
+    # TABLE RENAME, so the rename below aborts with "no such table:
+    # main.tasks" in the window where the old table is dropped and the new
+    # one not yet renamed. legacy_alter_table is precisely the documented
+    # escape for the 12-step rebuild procedure: it makes RENAME a rename
+    # rather than a schema-wide rewrite.
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            """CREATE TABLE tasks_rebuilt (
+                id                  INTEGER PRIMARY KEY,
+                lab_id              INTEGER NOT NULL REFERENCES labs(id),
+                parent_task_id      INTEGER REFERENCES tasks(id),
+                title               TEXT NOT NULL,
+                brief_path          TEXT NOT NULL,
+                direction           TEXT NOT NULL,
+                end_criteria        TEXT NOT NULL,
+                status              TEXT NOT NULL CHECK (status IN
+                                        ('open', 'in_progress', 'pending_prof_review',
+                                         'completed', 'abandoned')),
+                assigned_student_id INTEGER REFERENCES students(id),
+                created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        # Explicit column list, and ids copied verbatim: every referencing
+        # row identifies its task by id, so a renumbering here would
+        # silently repoint 17 students and 35 papers at the wrong work.
+        conn.execute(
+            "INSERT INTO tasks_rebuilt (id, lab_id, parent_task_id, title, brief_path, "
+            "direction, end_criteria, status, assigned_student_id, created_at, updated_at) "
+            "SELECT id, lab_id, parent_task_id, title, brief_path, direction, end_criteria, "
+            "status, assigned_student_id, created_at, updated_at FROM tasks"
+        )
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        after = conn.execute("SELECT COUNT(*) FROM tasks_rebuilt").fetchone()[0]
+        if before != after:
+            raise RuntimeError(f"tasks rebuild lost rows: {before} -> {after}")
+
+        conn.execute("DROP TABLE tasks")
+        conn.execute("ALTER TABLE tasks_rebuilt RENAME TO tasks")
+        # Dropping the table dropped its indexes and triggers with it.
+        for stmt in _TASKS_INDEXES_AND_TRIGGERS:
+            conn.execute(stmt)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute(f"PRAGMA foreign_keys={'ON' if was_on else 'OFF'}")
+
+    broken = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if len(broken) > broken_before:
+        raise RuntimeError(
+            f"tasks rebuild broke foreign keys: {broken_before} violations before, "
+            f"{len(broken)} after"
+        )
+
+
+# Recreated after the rebuild drops `tasks`. Copies of the corresponding
+# blocks in docs/schema.sql.
+_TASKS_INDEXES_AND_TRIGGERS = (
+    "CREATE INDEX idx_tasks_lab ON tasks(lab_id)",
+    "CREATE INDEX idx_tasks_status ON tasks(status)",
+    """CREATE TRIGGER trg_tasks_parent_same_lab
+    BEFORE INSERT ON tasks
+    WHEN NEW.parent_task_id IS NOT NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'child task must belong to the same lab as its parent')
+        WHERE (SELECT lab_id FROM tasks WHERE id = NEW.parent_task_id) != NEW.lab_id;
+    END""",
+    """CREATE TRIGGER trg_tasks_updated_at
+    AFTER UPDATE ON tasks
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE tasks SET updated_at = datetime('now') WHERE id = NEW.id;
+    END""",
+    """CREATE TRIGGER trg_tasks_abandon_releases_student
+    AFTER UPDATE OF status ON tasks
+    WHEN NEW.status = 'abandoned' AND OLD.status != 'abandoned'
+         AND NEW.assigned_student_id IS NOT NULL
+    BEGIN
+        UPDATE students SET task_id = NULL, status = 'unassigned'
+        WHERE id = NEW.assigned_student_id;
+    END""",
+)
 
 
 def _apply_missing_tables(conn: sqlite3.Connection) -> None:

@@ -188,6 +188,39 @@ class ExecuteDecomposeJobTests(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         conn.close()
 
+    def test_a_lab_whose_tasks_were_all_abandoned_can_decompose_again(self):
+        # Abandoned tasks are not live work. Counting them as a block left
+        # deleting the rows as the only route to a fresh decomposition --
+        # and tasks.id has no AUTOINCREMENT, so deleting the highest ids
+        # hands them straight back to the new tasks, silently repointing
+        # every job and event that referenced the old ones.
+        conn = fresh_db()
+        ids = _seed_professor(conn)
+        backend = ScriptedBackend(BackendResult(text=_payload(2)))
+
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            decompose.execute_professor_decompose_job(
+                conn, _enqueue(conn, ids["professor_id"]), backend, lab_dir
+            )
+            conn.execute("UPDATE tasks SET status='abandoned' WHERE lab_id=?", (ids["lab_id"],))
+            conn.commit()
+            backend2 = ScriptedBackend(BackendResult(text=_payload(2)))
+            decompose.execute_professor_decompose_job(
+                conn, _enqueue(conn, ids["professor_id"]), backend2, lab_dir
+            )
+
+        live = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status != 'abandoned'"
+        ).fetchone()[0]
+        self.assertEqual(live, 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 4)
+        self.assertEqual(len(backend2.calls), 1)
+        # ids must not be reused
+        rows = [r[0] for r in conn.execute("SELECT id FROM tasks ORDER BY id")]
+        self.assertEqual(len(set(rows)), 4)
+        conn.close()
+
     def test_rate_limit_leaves_job_pending(self):
         conn = fresh_db()
         ids = _seed_professor(conn)

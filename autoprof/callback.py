@@ -91,8 +91,8 @@ Respond with ONLY a JSON object, no markdown fences, no commentary, in exactly t
   "rationale": "...",
   "refined_end_criteria": "... or null",
   "parent_closes": true,
-  "children": [{{"title": "...", "direction": "prove|disprove|open", "end_criteria": "...", \
-"brief": "..."}}],
+  "children": [{{"title": "...", "direction": "prove|disprove|open|implement", \
+"end_criteria": "...", "brief": "..."}}],
   "nominate": false,
   "nomination_rationale": "..."}}
 "children" is used only for "split"; "refined_end_criteria" only for "keep_going".

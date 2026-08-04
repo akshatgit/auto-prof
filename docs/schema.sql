@@ -65,7 +65,20 @@ CREATE TABLE tasks (
     parent_task_id      INTEGER REFERENCES tasks(id),
     title               TEXT NOT NULL,
     brief_path          TEXT NOT NULL,   -- lab/<lab_id>/tasks/<id>/brief.md
-    direction           TEXT NOT NULL CHECK (direction IN ('prove', 'disprove', 'open')),
+    -- 'prove' | 'disprove' | 'open' | 'implement'. Deliberately NOT a
+    -- CHECK constraint: the vocabulary is a research-methodology question
+    -- that changes as labs of new kinds appear, and SQLite cannot alter a
+    -- CHECK without rebuilding the table -- so the constraint here and the
+    -- deployed one silently diverge, exactly as jobs.status did. The
+    -- authority is decompose.VALID_DIRECTIONS, which rejects an unknown
+    -- direction before insert.
+    --
+    -- 'implement' exists because the original three are a mathematician's
+    -- vocabulary. A self-improvement lab's unit of work is a landed commit
+    -- plus a measured before/after, and paper.py told students with a
+    -- 'prove' task to "construct the actual argument, in full" -- which
+    -- asked for a proof of a piece of software.
+    direction           TEXT NOT NULL,
     end_criteria        TEXT NOT NULL,
     status              TEXT NOT NULL CHECK (status IN
                             ('open', 'in_progress', 'pending_prof_review',
