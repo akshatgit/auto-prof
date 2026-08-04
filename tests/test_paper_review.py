@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from autoprof import paper_review  # noqa: E402
+from autoprof import config, paper_review  # noqa: E402
 from autoprof.backends.base import Backend, BackendResult  # noqa: E402
 from tests.helpers import fresh_db, seed_lab_with_student  # noqa: E402
 
@@ -325,6 +325,80 @@ class RevisionEnqueueTests(unittest.TestCase):
             conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'").fetchone()[0],
             0,
         )
+        conn.close()
+
+    def test_task_is_abandoned_once_it_hits_the_rejected_paper_cap(self):
+        # The loop that produced 29 rejected papers on task #4. Neither
+        # existing cap could stop it: max_accepted_papers counts successes
+        # and this task has none, and the supervision cap forces a
+        # write-up whose rejection re-enters supervision.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        cap = config.max_rejected_papers()
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            for _ in range(cap):
+                self._reject(conn, ids, lab_dir)
+
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (ids["task_id"],)
+        ).fetchone()
+        self.assertEqual(task["status"], "abandoned")
+        # and the last rejection must NOT have queued yet another rewrite
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'"
+            ).fetchone()[0],
+            cap - 1,
+        )
+        conn.close()
+
+    def test_below_the_cap_the_revise_loop_still_runs(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            for _ in range(config.max_rejected_papers() - 1):
+                self._reject(conn, ids, lab_dir)
+
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (ids["task_id"],)
+        ).fetchone()
+        self.assertNotEqual(task["status"], "abandoned")
+        conn.close()
+
+    def test_rejections_on_another_task_do_not_count(self):
+        # Per-task, not lab-wide: one task failing must not abandon a
+        # sibling task that is doing fine.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        other = conn.execute(
+            "INSERT INTO tasks (lab_id, title, brief_path, direction, end_criteria, status) "
+            "VALUES (?, 'Other', 'b.md', 'prove', 'crit', 'in_progress')",
+            (ids["lab_id"],),
+        ).lastrowid
+        prof = conn.execute(
+            "SELECT professor_id FROM students WHERE id = ?", (ids["student_id"],)
+        ).fetchone()["professor_id"]
+        other_student = conn.execute(
+            "INSERT INTO students (task_id, professor_id, status, memory_path) "
+            "VALUES (?, ?, 'working', 'm.md')",
+            (other, prof),
+        ).lastrowid
+        for title in ("Old", "Old2"):
+            conn.execute(
+                "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+                "VALUES (?, ?, 'p', ?, 'rejected', 1)",
+                (other, other_student, title),
+            )
+        conn.commit()
+        with tempfile.TemporaryDirectory() as d:
+            self._reject(conn, ids, Path(d))
+
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (ids["task_id"],)
+        ).fetchone()
+        self.assertNotEqual(task["status"], "abandoned")
         conn.close()
 
     def test_no_revision_once_the_lab_hits_its_accepted_paper_target(self):

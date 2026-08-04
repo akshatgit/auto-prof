@@ -175,6 +175,17 @@ def execute_paper_review_job(
     return "done"
 
 
+def _rejected_paper_count(conn: sqlite3.Connection, task_id: int) -> int:
+    """Rejected papers for THIS task only -- unlike the accepted count,
+    which is lab-wide. One task failing repeatedly must not be masked by
+    other tasks in the same lab succeeding."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM papers WHERE status = 'rejected' AND task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return row["n"]
+
+
 def _accepted_paper_count(conn: sqlite3.Connection, task_id: int) -> int:
     """Accepted papers across the whole lab that owns `task_id`.
 
@@ -255,6 +266,19 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         ).fetchone()
         if task_row:
             collaboration.request_scan(conn, task_row["lab_id"])
+    elif _rejected_paper_count(conn, paper["task_id"]) >= config.max_rejected_papers():
+        # Terminal: this task has spent its attempts. Neither existing cap
+        # can stop this case -- max_accepted_papers counts successes and a
+        # failing task has none, while the supervision cap forces a
+        # write-up whose rejection lands straight back in supervision. The
+        # loop that produced 29 rejected papers on task #4 ran through
+        # exactly this branch 28 times.
+        #
+        # Abandon rather than hand it to the professor: the professor has
+        # already been consulted every round and kept saying continue, so
+        # asking again is the same question that failed to terminate.
+        # trg_tasks_release_student frees the student.
+        conn.execute("UPDATE tasks SET status = 'abandoned' WHERE id = ?", (paper["task_id"],))
     else:
         # Revise-and-resubmit (§3.2 step 4). Without this a rejected paper
         # is a dead end -- the same gap `lab revise` closed for labs. The

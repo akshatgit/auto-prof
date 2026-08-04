@@ -23,6 +23,12 @@ max_accepted_papers = 4
 # so a non-converging loop terminates; the loop normally ends when the
 # professor says the work is ready.
 max_supervision_rounds = 12
+# Rejected papers ONE task may accumulate before it is abandoned. The
+# accepted-paper target cannot bound a task that never succeeds, and the
+# supervision cap forces a write-up that returns through review into
+# supervision -- so without this a task whose result is simply wrong
+# rewrites it forever.
+max_rejected_papers = 5
 # Ceiling on collaboration rounds between co-authoring students.
 max_collaboration_rounds = 6
 # Tasks a professor may open in one decomposition.

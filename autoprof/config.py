@@ -20,6 +20,19 @@ from . import db
 # the latter is what a lab exists to produce.
 DEFAULT_MAX_ACCEPTED_PAPERS = 4
 
+# How many REJECTED papers one task may accumulate before it is
+# abandoned. The accepted-paper target above cannot bound a task that
+# never succeeds -- it counts successes, so on a task whose result is
+# wrong it never binds -- and the supervision cap does not either, since
+# the write-up it forces returns through review and back into supervision.
+# Task #4 produced 29 rejected papers over 39 supervision rounds this way,
+# scoring 0.08 out of 5 on average and declining, with reviewers naming
+# the same defects in the last paper as in the first. This is the missing
+# terminal state: at some point the answer is that the student cannot
+# prove the theorem, and repeating the attempt costs quota without
+# changing that.
+DEFAULT_MAX_REJECTED_PAPERS = 5
+
 # How many tasks a professor may open in one decomposition. Each costs a
 # student and a full chain of model calls, so the default keeps a lab on a
 # workable front; a lab that genuinely spans several independent problems
@@ -78,6 +91,27 @@ def max_accepted_papers(config_path: Path | None = None, env: dict | None = None
             pass
 
     return DEFAULT_MAX_ACCEPTED_PAPERS
+
+
+def max_rejected_papers(config_path: Path | None = None, env: dict | None = None) -> int:
+    """Ceiling on rejected papers for ONE task before it is abandoned.
+    Per-task, unlike max_accepted_papers, because it bounds effort sunk
+    into a single problem rather than what the lab has to show overall."""
+    env = env if env is not None else os.environ
+    raw = env.get("AUTOPROF_MAX_REJECTED_PAPERS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+
+    configured = _load(config_path).get("lab", {}).get("max_rejected_papers")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_REJECTED_PAPERS
 
 
 def max_supervision_rounds(config_path: Path | None = None, env: dict | None = None) -> int:
