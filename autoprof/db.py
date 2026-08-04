@@ -56,6 +56,14 @@ _ADDITIVE_MIGRATIONS = (
     # preregistered RCT in metascience. NULL for labs created before this
     # column existed; both prompts omit the block when it is missing.
     ("labs", "seed_idea", "TEXT"),
+    # Which paper attempt a supervision meeting belongs to. The cap is
+    # measured within an attempt, and `round` cannot serve -- it is UNIQUE
+    # per task and names the artifact file, so it never resets. Deriving
+    # the boundary from created_at was tried and is wrong: those stamps
+    # have one-second granularity, so meetings and the paper that ends
+    # their attempt can share a timestamp and compare equal. NULL on rows
+    # predating the column; they are all treated as attempt 1.
+    ("supervisions", "attempt", "INTEGER"),
 )
 
 # Tables added after the schema first shipped. Mirrors the corresponding

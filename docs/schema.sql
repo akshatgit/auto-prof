@@ -452,6 +452,13 @@ CREATE TABLE supervisions (
     round         INTEGER NOT NULL CHECK (round >= 1),
     verdict       TEXT NOT NULL CHECK (verdict IN ('continue', 'ready', 'abandon')),
     guidance_path TEXT NOT NULL,   -- lab/<lab_id>/tasks/<task_id>/supervision/<round>.md
+    -- Which paper attempt this meeting belongs to. max_supervision_rounds
+    -- is measured within an attempt, not against `round`: `round` is
+    -- UNIQUE per task and names the artifact file, so it never resets, and
+    -- once it passed the cap every later meeting was force-resolved to
+    -- 'ready' -- the professor could no longer say 'continue' and the
+    -- student only re-drafted. NULL predates the column; treated as 1.
+    attempt       INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     -- One meeting per round per task: a duplicate would double-advance the
     -- loop and let two contradictory guidances both count as "the latest".

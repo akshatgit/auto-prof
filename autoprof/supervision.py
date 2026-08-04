@@ -136,6 +136,39 @@ def _next_round(conn: sqlite3.Connection, task_id: int) -> int:
     return row["r"] + 1
 
 
+def _current_attempt(conn: sqlite3.Connection, task_id: int) -> int:
+    """Which paper attempt this task is on. Writing a paper ends an
+    attempt, so the count of papers written so far identifies the next."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM papers WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return row["n"] + 1
+
+
+def _round_within_attempt(conn: sqlite3.Connection, task_id: int, attempt: int) -> int:
+    """Which supervision meeting this is *for the current attempt*.
+
+    The cap is measured against this rather than against `round`, which is
+    cumulative and names the artifact file, so it can never reset.
+
+    Once `round` passed the cap on task #4 the condition was permanently
+    true, so every later meeting was force-resolved to 'ready' -- 28 of
+    them -- and the professor could never say 'continue' again. The
+    student stopped doing research and only re-drafted the same unproven
+    theorem. Counting per attempt restores what the cap was protecting: a
+    fresh budget of real supervision behind each new attempt.
+
+    Rows written before the `attempt` column existed have NULL and are all
+    treated as attempt 1.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM supervisions WHERE task_id = ? "
+        "AND COALESCE(attempt, 1) = ?",
+        (task_id, attempt),
+    ).fetchone()
+    return row["n"] + 1
+
+
 def execute_professor_supervision_job(
     conn: sqlite3.Connection, job_id: int, backend: Backend, lab_dir: Path
 ) -> str:
@@ -206,8 +239,9 @@ def execute_professor_supervision_job(
         )
 
     max_rounds = config.max_supervision_rounds()
+    attempt = _current_attempt(conn, task["id"])
     forced = False
-    if verdict == "continue" and round_ >= max_rounds:
+    if verdict == "continue" and _round_within_attempt(conn, task["id"], attempt) >= max_rounds:
         # Terminate a loop that isn't converging -- but by writing up what
         # exists, not by discarding it. The research is real work; only the
         # supervisor's appetite for more rounds has run out.
@@ -226,9 +260,9 @@ def execute_professor_supervision_job(
     )
 
     conn.execute(
-        "INSERT INTO supervisions (task_id, student_id, round, verdict, guidance_path) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (task["id"], student["id"], round_, verdict, relpath),
+        "INSERT INTO supervisions (task_id, student_id, round, verdict, guidance_path, attempt) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (task["id"], student["id"], round_, verdict, relpath, attempt),
     )
 
     if verdict == "continue":

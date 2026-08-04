@@ -145,6 +145,55 @@ class SupervisionVerdictTests(unittest.TestCase):
         self.assertIn("student_write_paper", kinds)
         conn.close()
 
+    def test_the_cap_resets_once_a_paper_has_been_written(self):
+        # `round` is cumulative and can never reset -- it is UNIQUE per
+        # task and names the artifact file. Measuring the cap against it
+        # meant that once task #4 passed the cap the condition stayed true
+        # forever: 28 consecutive meetings were force-resolved to 'ready',
+        # the professor could never say 'continue' again, and the student
+        # stopped researching and only re-drafted. Each new attempt at the
+        # problem must get a fresh supervision budget.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda: 2):
+                self._run(conn, ids, lab_dir, _payload("continue"))
+                self._run(conn, ids, lab_dir, _payload("continue"))  # forced 'ready'
+
+                conn.execute(
+                    "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+                    "VALUES (?, ?, 'p.html', 'Attempt', 'rejected', 1)",
+                    (ids["task_id"], ids["student_id"]),
+                )
+                conn.execute(
+                    "UPDATE students SET status='working' WHERE id=?", (ids["student_id"],)
+                )
+                conn.commit()
+
+                self._run(conn, ids, lab_dir, _payload("continue"))
+
+        last = conn.execute("SELECT * FROM supervisions ORDER BY round DESC LIMIT 1").fetchone()
+        self.assertEqual(last["verdict"], "continue")   # honoured, not forced
+        self.assertEqual(last["round"], 3)              # round itself still monotonic
+        conn.close()
+
+    def test_the_cap_still_binds_within_one_attempt(self):
+        # Resetting per attempt must not make the cap unreachable.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda: 3):
+                for _ in range(3):
+                    self._run(conn, ids, lab_dir, _payload("continue"))
+
+        verdicts = [r["verdict"] for r in conn.execute(
+            "SELECT verdict FROM supervisions ORDER BY round"
+        )]
+        self.assertEqual(verdicts, ["continue", "continue", "ready"])
+        conn.close()
+
 
 class SupervisionContextTests(unittest.TestCase):
     def test_professor_prompt_carries_prior_meetings(self):
