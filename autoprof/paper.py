@@ -28,6 +28,17 @@ _LEADING_HTML_COMMENT_RE = re.compile(r"^\s*<!--.*?-->\s*\n", re.DOTALL)
 _TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
 _H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
+# The authority on papers.status -- that column carries no CHECK, because
+# SQLite cannot alter one and the deployed constraint then diverges from
+# docs/schema.sql unnoticed.
+#
+# 'superseded' is an accepted paper withdrawn so its task can be re-run,
+# typically because it was accepted under a weaker review standard. Not
+# 'rejected': nobody rejected it, and recording it so would falsify the
+# review history. It stops counting toward max_accepted_papers and stops
+# being eligible for a dissertation.
+VALID_PAPER_STATUSES = ("draft", "in_review", "accepted", "rejected", "superseded")
+
 MAX_TOOL_ROUNDS = 3
 
 _FENCE_RE = re.compile(r"^```(?:html)?\s*(.*?)\s*```$", re.DOTALL)

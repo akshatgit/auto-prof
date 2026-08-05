@@ -508,6 +508,24 @@ RECORD_QUERIES = {
 RECORD_ROW_LIMIT = 200
 
 
+def _conn_db_path(conn) -> str | None:
+    """The file behind an open connection.
+
+    The record tool used to locate the database through AUTOPROF_DB_PATH,
+    which nothing set -- so the meta lab's own evidence tool failed 62
+    times out of 62 while the caller was holding an open connection to
+    exactly the database it was looking for. An env var can be unset; the
+    connection cannot be wrong.
+    """
+    try:
+        for _, name, path in conn.execute("PRAGMA database_list"):
+            if name == "main" and path:
+                return path
+    except Exception:  # noqa: BLE001 -- fall through to the env var
+        pass
+    return None
+
+
 def run_record(body: str, db_path: str | None = None) -> dict:
     """Query this system's own operational record.
 
@@ -754,13 +772,26 @@ def _limit_resources():  # pragma: no cover -- runs in the child process
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
-def run_verifier(code: str, timeout: int = VERIFY_TIMEOUT_SECONDS) -> dict:
+def run_verifier(code: str, timeout: int = VERIFY_TIMEOUT_SECONDS,
+                 readonly_paths: tuple = ()) -> dict:
     """Execute a student's verification program and capture its output.
 
     Bounded rather than trusted: its own temp directory, wall-clock
-    timeout, address-space cap, no core dumps, stdin closed. `-I` isolates
-    it from the environment and from this repo's modules, so a program
-    cannot reach into the lab database.
+    timeout, address-space cap, no core dumps, stdin closed.
+
+    `readonly_paths` are bind-mounted read-only inside a private mount
+    namespace, and this is load-bearing rather than defensive. The
+    docstring here used to claim that `-I` meant "a program cannot reach
+    into the lab database"; `-I` governs module resolution and nothing
+    else, and a student building a review-oscillation monitor discovered
+    the gap the practical way -- it needed papers with oscillating review
+    histories, so it opened the production database from a verify program
+    and manufactured three papers and eighteen reviews inside the
+    operational record its own lab exists to measure.
+
+    It was not being adversarial. readfile, record and apply_patch were
+    all misconfigured and failing every call, so verify was the only tool
+    that worked, and this was the only route to the data it needed.
 
     Returns {status, output} -- never raises for a failing program, since
     a program that crashes is a legitimate (and informative) result the
@@ -776,7 +807,21 @@ def run_verifier(code: str, timeout: int = VERIFY_TIMEOUT_SECONDS) -> dict:
         # promised this; for a while they were simply wrong.
         argv = [sys.executable, "-I", str(script)]
         if _network_isolation_available():
-            argv = ["unshare", "-rn", *argv]
+            if readonly_paths:
+                # -m adds a mount namespace; --propagation private keeps
+                # the bind from escaping to the host. Each path is bound
+                # over itself and remounted read-only: SQLite then cannot
+                # create its journal, so writes fail rather than silently
+                # landing in production state.
+                binds = "; ".join(
+                    f"mount --bind {p} {p} && mount -o remount,bind,ro {p}"
+                    for p in readonly_paths
+                )
+                inner = " ".join([sys.executable, "-I", str(script)])
+                argv = ["unshare", "-rmn", "--propagation", "private",
+                        "sh", "-c", f"{binds}; exec {inner}"]
+            else:
+                argv = ["unshare", "-rn", *argv]
 
         try:
             proc = subprocess.run(
@@ -966,7 +1011,16 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
     sections = []
     for tool, body in calls:
         if tool == "verify":
-            result = run_verifier(body)
+            # The operational record and the lab artifact tree are
+            # read-only to a verification program by construction.
+            db_file = _conn_db_path(conn)
+            readonly = tuple(
+                str(x) for x in (
+                    Path(db_file).parent if db_file else None,
+                    lab_dir,
+                ) if x
+            )
+            result = run_verifier(body, readonly_paths=readonly)
         elif tool == "visualize":
             result = run_visualizer(body)
         elif tool == "readfile":
@@ -976,7 +1030,7 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
         elif tool == "experiment":
             result = run_experiment(body, lab_id)
         elif tool == "record":
-            result = run_record(body)
+            result = run_record(body, db_path=_conn_db_path(conn))
         elif tool == "propose_patch":
             result = run_propose_patch(body)
         else:

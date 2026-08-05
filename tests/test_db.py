@@ -221,3 +221,55 @@ class ToolRunsCheckRebuildTests(unittest.TestCase):
             conn.execute("SELECT tool FROM tool_runs WHERE id=1").fetchone()[0], "verify"
         )
         conn.close()
+
+
+class PapersStatusRebuildTests(unittest.TestCase):
+    """'superseded' -- an accepted paper withdrawn so its task can be
+    re-run under a stricter standard. Recording it as 'rejected' would
+    falsify the review history; leaving it 'accepted' keeps it counting
+    toward the lab's paper target and suppresses the revise loop."""
+
+    def _legacy_db(self):
+        conn = db.connect(":memory:")
+        db.ensure_initialized(conn)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE papers")
+        conn.execute(
+            "CREATE TABLE papers (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL "
+            "REFERENCES tasks(id), student_id INTEGER NOT NULL REFERENCES students(id), "
+            "path TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN "
+            "('draft','in_review','accepted','rejected')), review_round INTEGER NOT NULL "
+            "DEFAULT 1 CHECK (review_round >= 1), "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        for stmt in db._PAPERS_INDEXES_AND_TRIGGERS:
+            conn.execute(stmt)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+        return conn
+
+    def test_legacy_db_rejects_superseded(self):
+        conn = self._legacy_db()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO papers (task_id, student_id, path, title, status) "
+                "VALUES (1, 1, 'p', 't', 'superseded')"
+            )
+        conn.close()
+
+    def test_rebuild_allows_superseded_and_keeps_the_trigger(self):
+        conn = self._legacy_db()
+        db.ensure_initialized(conn)
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE tbl_name='papers' "
+                "AND type IN ('trigger','index')"
+            )
+        }
+        self.assertIn("trg_papers_student_matches_task", names)
+        self.assertIn("idx_papers_task", names)
+        self.assertNotIn(
+            "CHECK (status IN",
+            conn.execute("SELECT sql FROM sqlite_master WHERE name='papers'").fetchone()[0],
+        )
+        conn.close()

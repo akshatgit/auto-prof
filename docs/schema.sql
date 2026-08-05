@@ -495,8 +495,18 @@ CREATE TABLE papers (
     student_id      INTEGER NOT NULL REFERENCES students(id),
     path            TEXT NOT NULL,   -- lab/<lab_id>/tasks/<id>/papers/<id>/draft.md (overwritten each round)
     title           TEXT NOT NULL,
-    status          TEXT NOT NULL CHECK (status IN
-                        ('draft', 'in_review', 'accepted', 'rejected')),
+    -- 'draft' | 'in_review' | 'accepted' | 'rejected' | 'superseded'.
+    -- No CHECK, for the reason tasks.direction and tool_runs.tool have
+    -- none: SQLite cannot alter one, so this list and the deployed table
+    -- drift apart in silence. paper.VALID_PAPER_STATUSES is the authority.
+    --
+    -- 'superseded' is an accepted paper withdrawn from the record so its
+    -- task can be re-run -- typically because it was accepted under an
+    -- earlier, weaker review standard. It is not 'rejected': nobody
+    -- rejected it, and recording it that way would falsify the review
+    -- history. It stops counting toward max_accepted_papers and stops
+    -- being eligible for a dissertation, which is the whole point.
+    status          TEXT NOT NULL,
     review_round    INTEGER NOT NULL DEFAULT 1 CHECK (review_round >= 1),
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );

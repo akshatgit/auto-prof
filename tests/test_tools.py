@@ -533,3 +533,52 @@ class RecordToolTests(unittest.TestCase):
 
     def test_docs_tell_the_student_the_record_beats_the_design(self):
         self.assertIn("the record wins", tools.TOOL_DOCS)
+
+
+class VerifierIsolationTests(unittest.TestCase):
+    """A verify program wrote three papers and eighteen reviews into the
+    production database -- the operational record its own lab existed to
+    measure. `-I` was documented as preventing exactly that and does not:
+    it governs module resolution, not what sqlite3 may open."""
+
+    def test_readonly_paths_block_writes_but_not_computation(self):
+        import sqlite3
+
+        if not tools._network_isolation_available():
+            self.skipTest("namespaces unavailable in this environment")
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "record.db"
+            sqlite3.connect(target).execute("CREATE TABLE t (x)")
+            code = (
+                "import sqlite3\n"
+                f"try:\n"
+                f"    c = sqlite3.connect({str(target)!r})\n"
+                "    c.execute('INSERT INTO t VALUES (1)'); c.commit()\n"
+                "    print('WROTE')\n"
+                "except Exception as e:\n"
+                "    print('blocked')\n"
+                "print('sum', 2 + 2)\n"
+            )
+            result = tools.run_verifier(code, readonly_paths=(d,))
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("blocked", result["output"])
+        self.assertNotIn("WROTE", result["output"])
+        # the point of the tool still works
+        self.assertIn("sum 4", result["output"])
+
+    def test_record_finds_the_db_through_the_connection(self):
+        # It used to look this up in AUTOPROF_DB_PATH, which nothing set,
+        # so the meta lab's evidence tool failed 62 times out of 62 while
+        # the caller held an open connection to the very database.
+        from autoprof import db as _db
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "rec.db"
+            conn = _db.connect(path)
+            _db.ensure_initialized(conn)
+            self.assertEqual(tools._conn_db_path(conn), str(path))
+            self.assertEqual(
+                tools.run_record("labs", db_path=tools._conn_db_path(conn))["status"], "ok"
+            )
+            conn.close()

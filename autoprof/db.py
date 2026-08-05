@@ -398,6 +398,27 @@ def _drop_check_constraint(conn, table, marker, ddl, indexes_and_triggers) -> No
 
 # Recreated after the rebuild drops `tasks`. Copies of the corresponding
 # blocks in docs/schema.sql.
+_PAPERS_DDL = """CREATE TABLE {tmp} (
+    id              INTEGER PRIMARY KEY,
+    task_id         INTEGER NOT NULL REFERENCES tasks(id),
+    student_id      INTEGER NOT NULL REFERENCES students(id),
+    path            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    review_round    INTEGER NOT NULL DEFAULT 1 CHECK (review_round >= 1),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+_PAPERS_INDEXES_AND_TRIGGERS = (
+    "CREATE INDEX idx_papers_task ON papers(task_id)",
+    """CREATE TRIGGER trg_papers_student_matches_task
+    BEFORE INSERT ON papers
+    BEGIN
+        SELECT RAISE(ABORT, 'papers.student_id must be assigned to papers.task_id')
+        WHERE (SELECT task_id FROM students WHERE id = NEW.student_id) != NEW.task_id;
+    END""",
+)
+
 _TOOL_RUNS_INDEXES = (
     "CREATE INDEX idx_tool_runs_task ON tool_runs(task_id, created_at)",
 )
@@ -464,6 +485,7 @@ _TOOL_RUNS_DDL = """CREATE TABLE {tmp} (
 _CHECK_REBUILDS = (
     ("tasks", "CHECK (direction IN", _TASKS_DDL, _TASKS_INDEXES_AND_TRIGGERS),
     ("tool_runs", "CHECK (tool IN", _TOOL_RUNS_DDL, _TOOL_RUNS_INDEXES),
+    ("papers", "CHECK (status IN", _PAPERS_DDL, _PAPERS_INDEXES_AND_TRIGGERS),
 )
 
 

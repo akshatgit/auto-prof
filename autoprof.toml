@@ -52,4 +52,4 @@ max_review_exchanges = 2
 # Ceiling on collaboration rounds between co-authoring students.
 max_collaboration_rounds = 6
 # Tasks a professor may open in one decomposition.
-max_tasks_per_decomposition = 6
+max_tasks_per_decomposition = 3
