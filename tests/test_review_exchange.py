@@ -47,11 +47,15 @@ def _seed_paper(conn, ids, lab_dir: Path) -> int:
     return pid
 
 
-REQUEST = "REQUEST:\n- run the finite enumeration for n<=5 and report exact output"
+REQUEST = (
+    "REQUEST:\n- run the finite enumeration for n<=5 and report exact output\n\n"
+    "VERDICT: weak_accept"
+)
+_REQUEST_ONLY = "REQUEST:\n- run the finite enumeration"
 
 
 class ReviewerRequestTests(unittest.TestCase):
-    def test_a_request_defers_the_verdict_and_queues_the_authors(self):
+    def test_a_request_records_the_verdict_and_queues_the_authors(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
@@ -62,9 +66,10 @@ class ReviewerRequestTests(unittest.TestCase):
                 conn, job, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
             )
 
+        # The verdict stands on the record immediately: if the exchange
+        # never completes, this is what counts.
         self.assertEqual(
-            conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 0,
-            "a request is not a verdict and must not be recorded as one",
+            conn.execute("SELECT verdict FROM reviews").fetchone()[0], "weak_accept"
         )
         ex = conn.execute("SELECT * FROM review_exchanges").fetchone()
         self.assertEqual(ex["exchange_round"], 1)
@@ -76,9 +81,24 @@ class ReviewerRequestTests(unittest.TestCase):
         )
         conn.close()
 
-    def test_a_reply_carrying_both_is_treated_as_a_decision(self):
-        # A reviewer that decided and also mused about what it would like
-        # has not asked for anything; spending an exchange on it is waste.
+    def test_a_request_without_a_verdict_is_refused(self):
+        # The verdict is not optional. A reviewer that only asks has left
+        # the round with no state, so if the exchange fails there is
+        # nothing to tally.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            pid = _seed_paper(conn, ids, lab_dir)
+            job = paper_review.request_paper_review(conn, pid)[0]
+            outcome = paper_review.execute_paper_review_job(
+                conn, job, ScriptedBackend(BackendResult(text=_REQUEST_ONLY)), lab_dir
+            )
+        self.assertIn(outcome, ("retrying", "failed"))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_exchanges").fetchone()[0], 0)
+        conn.close()
+
+    def test_a_second_turn_revises_the_verdict_rather_than_filing_another(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
@@ -86,12 +106,27 @@ class ReviewerRequestTests(unittest.TestCase):
             pid = _seed_paper(conn, ids, lab_dir)
             job = paper_review.request_paper_review(conn, pid)[0]
             paper_review.execute_paper_review_job(
-                conn, job,
-                ScriptedBackend(BackendResult(text=REQUEST + "\n\nVERDICT: accept")),
-                lab_dir,
+                conn, job, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
             )
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 1)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_exchanges").fetchone()[0], 0)
+            resp = conn.execute(
+                "SELECT id FROM jobs WHERE kind='author_response'"
+            ).fetchone()["id"]
+            author_response.execute_author_response_job(
+                conn, resp, ScriptedBackend(BackendResult(text="ran it: 3, 15, 45")), lab_dir
+            )
+            nxt = conn.execute(
+                "SELECT id FROM jobs WHERE kind='paper_review' AND status='pending' "
+                "AND reviewer_index=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()["id"]
+            paper_review.execute_paper_review_job(
+                conn, nxt, ScriptedBackend(BackendResult(text="VERDICT: strong_accept")), lab_dir
+            )
+
+        rows = conn.execute(
+            "SELECT verdict FROM reviews WHERE reviewer_index=1"
+        ).fetchall()
+        self.assertEqual(len(rows), 1, "one verdict per reviewer per round")
+        self.assertEqual(rows[0]["verdict"], "strong_accept")
         conn.close()
 
     def test_the_exchange_loop_is_bounded(self):
@@ -112,13 +147,17 @@ class ReviewerRequestTests(unittest.TestCase):
                     "UPDATE review_exchanges SET response_path='r' WHERE response_path IS NULL"
                 )
                 conn.commit()
-            # One more request must be refused rather than granted.
+            # Past the cap the request is ignored and the verdict stands.
             outcome = paper_review.execute_paper_review_job(
                 conn, job, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
             )
-        self.assertIn(outcome, ("retrying", "failed"))
+        self.assertEqual(outcome, "done")
         self.assertEqual(
             conn.execute("SELECT COUNT(*) FROM review_exchanges").fetchone()[0], cap
+        )
+        self.assertEqual(
+            conn.execute("SELECT verdict FROM reviews WHERE reviewer_index=1").fetchone()[0],
+            "weak_accept",
         )
         conn.close()
 
@@ -210,3 +249,68 @@ class AuthorResponseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinalizeGateTests(unittest.TestCase):
+    """Recording verdicts immediately creates a hazard the deferred design
+    did not have: all three can be on record while one reviewer is still
+    corresponding. Tallying then decides the paper on a verdict its own
+    author has said it may revise."""
+
+    def test_the_round_is_not_tallied_while_an_exchange_is_open(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            pid = _seed_paper(conn, ids, lab_dir)
+            j1, j2, j3 = paper_review.request_paper_review(conn, pid)
+            # reviewer 1 asks; reviewers 2 and 3 decide outright
+            paper_review.execute_paper_review_job(
+                conn, j1, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
+            )
+            for j in (j2, j3):
+                paper_review.execute_paper_review_job(
+                    conn, j, ScriptedBackend(BackendResult(text="VERDICT: strong_accept")), lab_dir
+                )
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 3,
+            "all three verdicts are on record",
+        )
+        self.assertEqual(
+            conn.execute("SELECT status FROM papers WHERE id=?", (pid,)).fetchone()[0],
+            "in_review",
+            "but the paper must not be decided while reviewer 1 is still asking",
+        )
+        conn.close()
+
+    def test_the_round_tallies_once_the_conversation_closes(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            pid = _seed_paper(conn, ids, lab_dir)
+            j1, j2, j3 = paper_review.request_paper_review(conn, pid)
+            paper_review.execute_paper_review_job(
+                conn, j1, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
+            )
+            for j in (j2, j3):
+                paper_review.execute_paper_review_job(
+                    conn, j, ScriptedBackend(BackendResult(text="VERDICT: strong_accept")), lab_dir
+                )
+            resp = conn.execute("SELECT id FROM jobs WHERE kind='author_response'").fetchone()["id"]
+            author_response.execute_author_response_job(
+                conn, resp, ScriptedBackend(BackendResult(text="ran it")), lab_dir
+            )
+            nxt = conn.execute(
+                "SELECT id FROM jobs WHERE kind='paper_review' AND status='pending' "
+                "AND reviewer_index=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()["id"]
+            paper_review.execute_paper_review_job(
+                conn, nxt, ScriptedBackend(BackendResult(text="VERDICT: strong_accept")), lab_dir
+            )
+
+        self.assertEqual(
+            conn.execute("SELECT status FROM papers WHERE id=?", (pid,)).fetchone()[0], "accepted"
+        )
+        conn.close()

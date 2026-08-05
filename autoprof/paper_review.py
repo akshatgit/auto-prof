@@ -140,29 +140,6 @@ def execute_paper_review_job(
     matches = _VERDICT_RE.findall(result.text)
     task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
 
-    # A REQUEST only counts when the reviewer did NOT also decide: a reply
-    # carrying both is a reviewer who made up its mind and left a comment,
-    # and routing that to the authors would buy an exchange for nothing.
-    request = _REQUEST_RE.search(result.text)
-    if request and not matches:
-        used = _exchanges_used(conn, paper["id"], row["review_round"], row["reviewer_index"])
-        if used < config.max_review_exchanges():
-            _open_exchange(
-                conn, paper, task, row, used + 1, request.group(1).strip(), lab_dir, job_id
-            )
-            if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
-                return "not_claimed"
-            conn.commit()
-            return "done"
-        # Out of exchanges. The rubric tells the reviewer it must decide on
-        # what it has once they run out, so a request here means it ignored
-        # that -- fail rather than silently invent a verdict for it.
-        return jobs.fail_job(
-            conn, job_id, lease_id,
-            f"reviewer {row['reviewer_index']} requested more after {used} exchange(s); "
-            "the rubric requires a VERDICT at that point",
-        )
-
     if not matches:
         return jobs.fail_job(
             conn, job_id, lease_id, f"no VERDICT line found in review output: {result.text[:300]}"
@@ -175,14 +152,37 @@ def execute_paper_review_job(
     )
     write_artifact(lab_dir / relpath, result.text)
 
+    # Upsert, not insert: a reviewer that opened an exchange already has a
+    # row for this round, and its second turn revises that verdict rather
+    # than filing a second one. UNIQUE(target, round, reviewer_index)
+    # guarantees at most one verdict per reviewer either way.
     conn.execute(
-        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path, reviewer_backend) "
-        "VALUES ('paper', ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, "
+        "rationale_path, reviewer_backend) VALUES ('paper', ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (target_type, target_id, review_round, reviewer_index) "
+        "DO UPDATE SET verdict=excluded.verdict, rationale_path=excluded.rationale_path, "
+        "reviewer_backend=excluded.reviewer_backend",
         (
             paper["id"], row["review_round"], row["reviewer_index"], verdict,
             relpath, backend.name,
         ),
     )
+
+    # The verdict above stands on the record whatever happens next. If the
+    # reviewer also asked the authors for something, it is saying "this is
+    # my judgement as things stand, and here is what could change it" --
+    # so the round must not be tallied until that conversation finishes.
+    request = _REQUEST_RE.search(result.text)
+    opened = False
+    if request:
+        used = _exchanges_used(conn, paper["id"], row["review_round"], row["reviewer_index"])
+        if used < config.max_review_exchanges():
+            _open_exchange(
+                conn, paper, task, row, used + 1, request.group(1).strip(), lab_dir, job_id
+            )
+            opened = True
+        # Past the cap the request is simply ignored: the verdict is real
+        # and the rubric already told the reviewer this was its last turn.
 
     if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
         return "not_claimed"
@@ -199,7 +199,8 @@ def execute_paper_review_job(
     )
     conn.commit()
 
-    _maybe_finalize(conn, paper["id"], row["review_round"], job_id)
+    if not opened:
+        _maybe_finalize(conn, paper["id"], row["review_round"], job_id)
     return "done"
 
 
@@ -318,6 +319,25 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         (paper_id, review_round),
     ).fetchone()["n"]
     if reported < REVIEWER_COUNT:
+        return
+
+    # All three have filed a verdict, but one of them may still be talking
+    # to the authors -- reviewer 3 can land last while reviewer 1 is
+    # mid-exchange. Tallying now would accept or reject the paper on a
+    # verdict its own author has already said it might revise, and would
+    # leave the returning reviewer writing into a finished round.
+    outstanding = conn.execute(
+        "SELECT COUNT(*) AS n FROM review_exchanges WHERE target_type='paper' "
+        "AND target_id=? AND review_round=? AND response_path IS NULL",
+        (paper_id, review_round),
+    ).fetchone()["n"]
+    pending_turns = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE target_type='paper' AND target_id=? "
+        "AND review_round=? AND kind IN ('paper_review','author_response') "
+        "AND status IN ('pending','running')",
+        (paper_id, review_round),
+    ).fetchone()["n"]
+    if outstanding or pending_turns:
         return
 
     strong = conn.execute(

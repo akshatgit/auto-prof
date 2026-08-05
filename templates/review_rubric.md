@@ -75,7 +75,8 @@ of a computation they describe, a clarification of which of two readings
 a definition intends — do not guess and do not dock them for it silently.
 Ask.
 
-To ask, emit a REQUEST block **instead of** a VERDICT line:
+**Still give your VERDICT.** A request never replaces it. Say what you
+judge the document to be *as it stands*, then say what could change that:
 
 REQUEST:
 - one specific, checkable thing you need, stated so the authors know
@@ -83,10 +84,20 @@ REQUEST:
 - (at most three items; each must be something that could actually change
   your verdict)
 
+VERDICT: <your judgement on the document as it stands right now>
+
+Verdict first in your mind, request second. If the authors never answer,
+if the exchange fails, or if you run out of turns, the verdict you just
+gave is the one that counts — so it must be one you are willing to stand
+behind today, not a placeholder. Do not park a document at
+`weak_reject` "pending clarification"; grade what is actually in front of
+you and let the answer move you.
+
 The authors will answer, and may run computations to do so. You will then
-see their response and decide. You are not obliged to be satisfied by it:
-an answer that dodges, or a computation that does not show what was
-asked, is itself evidence and should be judged accordingly.
+see their response and give your verdict again — revised or unchanged.
+You are not obliged to be satisfied: an answer that dodges, or a
+computation that does not show what was asked, is itself evidence and
+should move your verdict *down*, not leave it where it was.
 
 Limits, which matter:
 
@@ -96,9 +107,9 @@ Limits, which matter:
 - Never ask for something you can determine yourself. If you can run the
   check in your head or on paper, run it. A request is for what only the
   authors have.
-- Requests are finite. After the last exchange you must return a VERDICT
-  on what is in front of you; "they never showed me" is then a reason for
-  a verdict, not for another request.
+- Requests are finite. Once your exchanges are spent, a further request
+  is ignored and your verdict stands as given; "they never showed me" is
+  then a reason for a verdict, not for another request.
 - Do not use a request to negotiate. You are not telling the authors what
   to write in order to pass; you are asking for evidence you need in
   order to judge.
