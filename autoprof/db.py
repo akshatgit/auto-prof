@@ -128,6 +128,26 @@ _ADDITIVE_TABLES = (
         "CREATE INDEX idx_tool_runs_task ON tool_runs(task_id, created_at)",
     ),
     (
+        "review_exchanges",
+        """CREATE TABLE review_exchanges (
+            id              INTEGER PRIMARY KEY,
+            target_type     TEXT NOT NULL CHECK (target_type IN ('paper', 'defense')),
+            target_id       INTEGER NOT NULL,
+            review_round    INTEGER NOT NULL CHECK (review_round >= 1),
+            reviewer_index  INTEGER NOT NULL,
+            exchange_round  INTEGER NOT NULL CHECK (exchange_round >= 1),
+            request_path    TEXT NOT NULL,
+            response_path   TEXT,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (target_type, target_id, review_round, reviewer_index, exchange_round)
+        )""",
+    ),
+    (
+        "idx_review_exchanges_target",
+        "CREATE INDEX idx_review_exchanges_target ON review_exchanges"
+        "(target_type, target_id, review_round, reviewer_index)",
+    ),
+    (
         "source_documents",
         """CREATE TABLE source_documents (
             id         INTEGER PRIMARY KEY,

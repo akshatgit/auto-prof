@@ -33,6 +33,17 @@ DEFAULT_MAX_ACCEPTED_PAPERS = 4
 # changing that.
 DEFAULT_MAX_REJECTED_PAPERS = 5
 
+# How many request-and-response exchanges ONE reviewer may have with the
+# authors inside a single review round. Real peer review lets a reviewer
+# say "run this and show me" before committing; the rubric's empirical
+# gate is otherwise unreachable by construction, since it demands a
+# falsification test nothing ever asked the authors to run -- three
+# reviewers withheld strong_accept from a correct paper for exactly that.
+# Bounded, and low, because every unbounded loop here has run away: 39
+# supervision rounds, 29 rejected papers, 12 lab reviews oscillating at
+# the bar. Two is enough to ask and to follow up once.
+DEFAULT_MAX_REVIEW_EXCHANGES = 2
+
 # How many tasks a professor may open in one decomposition. Each costs a
 # student and a full chain of model calls, so the default keeps a lab on a
 # workable front; a lab that genuinely spans several independent problems
@@ -112,6 +123,24 @@ def max_rejected_papers(config_path: Path | None = None, env: dict | None = None
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_REJECTED_PAPERS
+
+
+def max_review_exchanges(config_path: Path | None = None, env: dict | None = None) -> int:
+    """Ceiling on reviewer<->author exchanges per reviewer per round."""
+    env = env if env is not None else os.environ
+    raw = env.get("AUTOPROF_MAX_REVIEW_EXCHANGES")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_review_exchanges")
+    if configured is not None:
+        try:
+            return max(0, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_REVIEW_EXCHANGES
 
 
 def max_supervision_rounds(config_path: Path | None = None, env: dict | None = None) -> int:

@@ -66,6 +66,43 @@ test. Unanimous agreement among reviewers is not evidence. Execution is.
 Agreement that has never been checked against something outside the
 argument is exactly the failure mode this step is here to catch.
 
+## You may ask the authors for what you need
+
+If the only thing standing between this document and an accept-tier
+verdict is something the authors could *supply* — the output of a finite
+check they did not run, an archived enumeration, the exact search domain
+of a computation they describe, a clarification of which of two readings
+a definition intends — do not guess and do not dock them for it silently.
+Ask.
+
+To ask, emit a REQUEST block **instead of** a VERDICT line:
+
+REQUEST:
+- one specific, checkable thing you need, stated so the authors know
+  exactly what would satisfy you
+- (at most three items; each must be something that could actually change
+  your verdict)
+
+The authors will answer, and may run computations to do so. You will then
+see their response and decide. You are not obliged to be satisfied by it:
+an answer that dodges, or a computation that does not show what was
+asked, is itself evidence and should be judged accordingly.
+
+Limits, which matter:
+
+- Ask only for what would **change your verdict**. If you would give the
+  same verdict whatever the answer, that is not a request, it is a
+  comment — put it in the review and decide now.
+- Never ask for something you can determine yourself. If you can run the
+  check in your head or on paper, run it. A request is for what only the
+  authors have.
+- Requests are finite. After the last exchange you must return a VERDICT
+  on what is in front of you; "they never showed me" is then a reason for
+  a verdict, not for another request.
+- Do not use a request to negotiate. You are not telling the authors what
+  to write in order to pass; you are asking for evidence you need in
+  order to judge.
+
 ## Revision is not a reason to soften
 
 This document may be a revision that has already survived earlier rounds

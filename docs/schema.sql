@@ -554,6 +554,36 @@ CREATE TABLE reviews (
     UNIQUE (target_type, target_id, review_round, reviewer_index)
 );
 
+-- One request-and-response exchange between a reviewer and the authors,
+-- within a single review round. Real peer review lets a reviewer say
+-- "run this and show me" before committing to a verdict; without it the
+-- rubric's empirical gate is unreachable by construction, because it
+-- demands a falsification test that nothing ever told the authors to run.
+--
+-- Private to the reviewer who asked. Reviewer independence is the
+-- load-bearing assumption of the whole panel (docs/DESIGN.md §4), so one
+-- reviewer's request and the authors' answer to it are never shown to
+-- another reviewer -- otherwise the panel converges through the authors
+-- as a relay and the three verdicts stop being three observations.
+CREATE TABLE review_exchanges (
+    id              INTEGER PRIMARY KEY,
+    target_type     TEXT NOT NULL CHECK (target_type IN ('paper', 'defense')),
+    target_id       INTEGER NOT NULL,
+    review_round    INTEGER NOT NULL CHECK (review_round >= 1),
+    reviewer_index  INTEGER NOT NULL,
+    -- 1..config.max_review_exchanges. Bounded because every unbounded
+    -- loop in this system has eventually run away: 39 supervision rounds,
+    -- 29 rejected papers, 12 lab reviews oscillating at the bar.
+    exchange_round  INTEGER NOT NULL CHECK (exchange_round >= 1),
+    request_path    TEXT NOT NULL,   -- .../reviews/<round>/<idx>.request.<n>.md
+    response_path   TEXT,            -- NULL until the authors answer
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (target_type, target_id, review_round, reviewer_index, exchange_round)
+);
+
+CREATE INDEX idx_review_exchanges_target
+    ON review_exchanges(target_type, target_id, review_round, reviewer_index);
+
 -- Validate target existence, that review_round matches the target's
 -- CURRENT review_round (a review can't be filed against a stale round),
 -- and reviewer_index bounds (3 reviewers for papers, 5 for defenses --

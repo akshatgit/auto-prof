@@ -44,6 +44,11 @@ max_supervision_rounds = 12
 # supervision -- so without this a task whose result is simply wrong
 # rewrites it forever.
 max_rejected_papers = 5
+# Request-and-response exchanges ONE reviewer may have with the authors
+# inside a single review round, before it must return a verdict on what it
+# has. Lets a reviewer say "run this and show me" rather than silently
+# docking the paper for evidence nobody asked for.
+max_review_exchanges = 2
 # Ceiling on collaboration rounds between co-authoring students.
 max_collaboration_rounds = 6
 # Tasks a professor may open in one decomposition.

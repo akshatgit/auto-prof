@@ -33,6 +33,9 @@ STRONG_ACCEPT_THRESHOLD = 2
 
 _RUBRIC_PATH = db.REPO_ROOT / "templates" / "review_rubric.md"
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(\w+)\s*$", re.MULTILINE)
+# A reviewer may ask the authors for evidence instead of deciding. The
+# block runs to the end of the reply, so the whole tail is the request.
+_REQUEST_RE = re.compile(r"^REQUEST:\s*$(.*)", re.MULTILINE | re.DOTALL)
 _LEADING_HTML_COMMENT_RE = re.compile(r"^\s*<!--.*?-->\s*\n", re.DOTALL)
 
 DOCUMENT_TYPE = "a research paper submitted to an automated lab"
@@ -119,9 +122,10 @@ def execute_paper_review_job(
     if not paper_file.exists():
         return jobs.fail_job(conn, job_id, lease_id, f"paper file missing: {paper['path']}")
 
-    result = jobs.run_with_session(
-        conn, job_id, backend, build_review_prompt(paper_file.read_text())
+    prompt = build_review_prompt(paper_file.read_text()) + exchange_transcript(
+        conn, paper["id"], row["review_round"], row["reviewer_index"], lab_dir
     )
+    result = jobs.run_with_session(conn, job_id, backend, prompt)
 
     if result.rate_limited:
         jobs.record_rate_limit(
@@ -134,13 +138,37 @@ def execute_paper_review_job(
     # Last match, not first: a reviewer will sometimes quote the required
     # format while explaining itself before emitting the real verdict.
     matches = _VERDICT_RE.findall(result.text)
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
+
+    # A REQUEST only counts when the reviewer did NOT also decide: a reply
+    # carrying both is a reviewer who made up its mind and left a comment,
+    # and routing that to the authors would buy an exchange for nothing.
+    request = _REQUEST_RE.search(result.text)
+    if request and not matches:
+        used = _exchanges_used(conn, paper["id"], row["review_round"], row["reviewer_index"])
+        if used < config.max_review_exchanges():
+            _open_exchange(
+                conn, paper, task, row, used + 1, request.group(1).strip(), lab_dir, job_id
+            )
+            if not jobs.complete_job(conn, job_id, lease_id, model_version=result.model_version):
+                return "not_claimed"
+            conn.commit()
+            return "done"
+        # Out of exchanges. The rubric tells the reviewer it must decide on
+        # what it has once they run out, so a request here means it ignored
+        # that -- fail rather than silently invent a verdict for it.
+        return jobs.fail_job(
+            conn, job_id, lease_id,
+            f"reviewer {row['reviewer_index']} requested more after {used} exchange(s); "
+            "the rubric requires a VERDICT at that point",
+        )
+
     if not matches:
         return jobs.fail_job(
             conn, job_id, lease_id, f"no VERDICT line found in review output: {result.text[:300]}"
         )
     verdict = matches[-1]
 
-    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
     relpath = (
         f"{task['lab_id']}/tasks/{paper['task_id']}/papers/{paper['id']}"
         f"/reviews/{row['review_round']}/{row['reviewer_index']}.md"
@@ -173,6 +201,78 @@ def execute_paper_review_job(
 
     _maybe_finalize(conn, paper["id"], row["review_round"], job_id)
     return "done"
+
+
+def _exchanges_used(conn, paper_id: int, review_round: int, reviewer_index: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM review_exchanges WHERE target_type='paper' "
+        "AND target_id=? AND review_round=? AND reviewer_index=?",
+        (paper_id, review_round, reviewer_index),
+    ).fetchone()["n"]
+
+
+def _open_exchange(conn, paper, task, row, exchange_round, request_text, lab_dir, job_id) -> int:
+    """Record a reviewer's request and queue the authors' answer."""
+    base = (f"{task['lab_id']}/tasks/{paper['task_id']}/papers/{paper['id']}"
+            f"/reviews/{row['review_round']}")
+    relpath = f"{base}/{row['reviewer_index']}.request.{exchange_round}.md"
+    write_artifact(lab_dir / relpath, request_text)
+    conn.execute(
+        "INSERT INTO review_exchanges (target_type, target_id, review_round, reviewer_index, "
+        "exchange_round, request_path) VALUES ('paper', ?, ?, ?, ?, ?)",
+        (paper["id"], row["review_round"], row["reviewer_index"], exchange_round, relpath),
+    )
+    cur = conn.execute(
+        "INSERT INTO jobs (kind, target_type, target_id, status, review_round, reviewer_index) "
+        "VALUES ('author_response', 'paper', ?, 'pending', ?, ?)",
+        (paper["id"], row["review_round"], row["reviewer_index"]),
+    )
+    record_job_event(
+        conn, job_id=job_id, actor_type="reviewer", actor_id=None,
+        event_type="review_request_raised", target_type="paper", target_id=paper["id"],
+        payload_path=relpath,
+    )
+    return cur.lastrowid
+
+
+def exchange_transcript(conn, paper_id: int, review_round: int, reviewer_index: int,
+                        lab_dir: Path) -> str:
+    """This reviewer's own request/response history, for its next turn.
+
+    Scoped to one reviewer on purpose: showing reviewer 2 what reviewer 1
+    asked, or what the authors told reviewer 1, would let the panel
+    converge through the authors as a relay and the three verdicts would
+    stop being three independent observations.
+    """
+    rows = conn.execute(
+        "SELECT * FROM review_exchanges WHERE target_type='paper' AND target_id=? "
+        "AND review_round=? AND reviewer_index=? ORDER BY exchange_round",
+        (paper_id, review_round, reviewer_index),
+    ).fetchall()
+    if not rows:
+        return ""
+    parts = []
+    for r in rows:
+        req = (lab_dir / r["request_path"]).read_text(errors="replace") \
+            if (lab_dir / r["request_path"]).exists() else "(request missing)"
+        parts.append(f"--- You asked (exchange {r['exchange_round']}) ---\n{req}")
+        if r["response_path"]:
+            path = lab_dir / r["response_path"]
+            resp = path.read_text(errors="replace") if path.exists() else "(response missing)"
+            parts.append(f"--- The authors answered ---\n{resp}")
+    remaining = config.max_review_exchanges() - len(rows)
+    closing = (
+        "You have no exchanges left: return a VERDICT on what you now have."
+        if remaining <= 0 else
+        f"You may make {remaining} further request if you genuinely need one."
+    )
+    return (
+        "\n\nYou already corresponded with the authors about this document. "
+        "Judge the answers as evidence -- an answer that dodges the question, or a "
+        "computation that does not show what you asked for, counts against the paper.\n\n"
+        + "\n\n".join(parts)
+        + f"\n\n{closing}\n"
+    )
 
 
 def _rejected_paper_count(conn: sqlite3.Connection, task_id: int) -> int:

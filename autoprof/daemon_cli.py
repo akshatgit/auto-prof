@@ -27,6 +27,7 @@ from .defense import (
 )
 from .paper_review import execute_paper_review_job
 from .references import execute_reference_verify_job
+from .author_response import execute_author_response_job
 from .supervision import execute_professor_supervision_job
 from .prompt_builders import default_builders
 
@@ -43,6 +44,7 @@ SPECIAL_HANDLERS = {
     "student_write_paper": execute_student_write_paper_job,
     "student_revise_paper": execute_student_revise_paper_job,
     "paper_review": execute_paper_review_job,
+    "author_response": execute_author_response_job,
     "professor_supervision": execute_professor_supervision_job,
     "professor_callback": execute_professor_callback_job,
     "collaboration_scan": execute_collaboration_scan_job,
