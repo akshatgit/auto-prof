@@ -176,3 +176,28 @@ class OllamaModelSelectionTests(unittest.TestCase):
     def test_registry_threads_the_model_into_the_instance(self):
         reg = registry.Registry(config={"backends": {"ollama_model": "deepseek-v4-pro"}}, env={})
         self.assertEqual(reg.get_backend("student_work").model, "deepseek-v4-pro")
+
+    def test_timeout_is_configurable(self):
+        # 280s was a hardcoded constructor default. When generation moved
+        # to a slower model the longest jobs exceeded it on EVERY attempt,
+        # so all five retries hit the same wall and the task stranded --
+        # retries cannot rescue work that is simply longer than a fixed
+        # limit.
+        opts = registry.backend_options(
+            "ollama_cloud", {"backends": {"ollama_timeout": 900}}, {}
+        )
+        self.assertEqual(opts["timeout"], 900.0)
+
+    def test_env_timeout_wins_and_is_left_to_the_backend(self):
+        opts = registry.backend_options(
+            "ollama_cloud",
+            {"backends": {"ollama_timeout": 900}},
+            {"AUTOPROF_OLLAMA_TIMEOUT": "1200"},
+        )
+        self.assertNotIn("timeout", opts)   # the backend reads the env var itself
+
+    def test_a_bad_timeout_value_falls_back_rather_than_raising(self):
+        opts = registry.backend_options(
+            "ollama_cloud", {"backends": {"ollama_timeout": "not-a-number"}}, {}
+        )
+        self.assertNotIn("timeout", opts)

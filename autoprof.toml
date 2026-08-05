@@ -24,6 +24,14 @@
 #
 # AUTOPROF_OLLAMA_MODEL overrides this.
 ollama_model = "minimax-m3"
+# Seconds before an Ollama call is abandoned. Was a hardcoded 280 that
+# nothing could change, which became a hard ceiling when generation moved
+# to a slower model: the longest jobs -- revising a paper against three
+# full reviews -- exceeded it on every attempt, so all five retries hit
+# the same wall and the task stranded. Keep it comfortably inside the job
+# leases (1800s review, 3600s student work).
+# AUTOPROF_OLLAMA_TIMEOUT overrides this.
+ollama_timeout = 900
 
 [backends.default]
 generation = "ollama_cloud"   # student work, professor decompose/callback, memory compaction

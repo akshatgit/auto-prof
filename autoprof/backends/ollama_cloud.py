@@ -19,10 +19,29 @@ class OllamaCloudBackend(Backend):
     DEFAULT_HOST = "https://ollama.com"
     DEFAULT_MODEL = "gpt-oss:120b"
 
-    def __init__(self, model=None, api_key=None, host=None, timeout=280, http_call=None):
+    # 280s was a bare constructor default nothing could configure, and it
+    # became a hard ceiling the moment generation moved to a slower, more
+    # capable model. The longest jobs in the system -- revising a paper
+    # against three full reviews, working a task with a large memory --
+    # exceeded it EVERY attempt, so the retry policy burned all five tries
+    # against the same wall and stranded the task. Retries cannot help
+    # when the limit is fixed and the work is simply longer than it.
+    #
+    # 900s sits well inside the job leases (1800s for review, 3600s for
+    # student work), so a slow call still finishes before another worker
+    # can reclaim the job.
+    DEFAULT_TIMEOUT_SECONDS = 900
+
+    def __init__(self, model=None, api_key=None, host=None, timeout=None, http_call=None):
         self.model = model or self.DEFAULT_MODEL
         self.api_key = api_key if api_key is not None else os.environ.get("OLLAMA_API_KEY")
         self.host = (host or self.DEFAULT_HOST).rstrip("/")
+        if timeout is None:
+            configured = os.environ.get("AUTOPROF_OLLAMA_TIMEOUT")
+            try:
+                timeout = float(configured) if configured else self.DEFAULT_TIMEOUT_SECONDS
+            except ValueError:
+                timeout = self.DEFAULT_TIMEOUT_SECONDS
         self.timeout = timeout
         self.http_call = http_call or self._real_http_call
 

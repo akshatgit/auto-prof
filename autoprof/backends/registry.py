@@ -127,8 +127,21 @@ def backend_options(name: str, config: dict, env: dict) -> dict:
     """
     if name != "ollama_cloud":
         return {}
+    opts = {}
     model = env.get("AUTOPROF_OLLAMA_MODEL") or config.get("backends", {}).get("ollama_model")
-    return {"model": model} if model else {}
+    if model:
+        opts["model"] = model
+    # The backend reads AUTOPROF_OLLAMA_TIMEOUT itself; this adds the
+    # config-file layer so the ceiling is visible next to the model it
+    # has to accommodate -- a slower model needs a longer one, and the two
+    # settings drifting apart is what stranded two tasks.
+    raw = config.get("backends", {}).get("ollama_timeout")
+    if raw is not None and not env.get("AUTOPROF_OLLAMA_TIMEOUT"):
+        try:
+            opts["timeout"] = float(raw)
+        except (TypeError, ValueError):
+            pass
+    return opts
 
 
 def load_config(path: Path | None) -> dict:
