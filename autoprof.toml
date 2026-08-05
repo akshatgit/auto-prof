@@ -6,13 +6,24 @@
 [backends]
 # Which Ollama model runs generation. Was a hardcoded constant in
 # ollama_cloud.py, so the model that wrote every paper in this system was
-# invisible to the config. Chosen on evidence: deepseek-v4-pro tied for
-# top score on a machine-scored probe set drawn from the failures
-# reviewers actually caught (refusing a false lemma, producing a required
-# table, honouring hard constraints) and was the fastest of the models
-# that tied, at ~10s mean against the previous default's ~15s.
+# invisible to the config.
+#
+# Not chosen on a measured quality ranking, because there wasn't one. Two
+# rounds of machine-scored probes failed to separate five candidates: the
+# first hit the ceiling (all 4/4, including the previous default), and the
+# second turned out to be sampling noise -- minimax-m3 scored 0.75 and
+# then 1.00 on a re-run of the identical prompt. Latency is the only
+# signal that reproduced.
+#
+# minimax-m3 is the pick on the strength of its actual reasoning rather
+# than its score. Asked to prove a false lemma, it refused, built the
+# counterexample, and then volunteered why the counterexample needs
+# independence systems rather than matroids -- which is precisely the
+# distinction whose loss made a real paper here collapse. It is slower
+# (~40s against ~21s).
+#
 # AUTOPROF_OLLAMA_MODEL overrides this.
-ollama_model = "deepseek-v4-pro"
+ollama_model = "minimax-m3"
 
 [backends.default]
 generation = "ollama_cloud"   # student work, professor decompose/callback, memory compaction
