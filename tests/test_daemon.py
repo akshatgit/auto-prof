@@ -156,6 +156,31 @@ class DispatchPendingJobsTests(unittest.TestCase):
         self.assertEqual(dispatched, 0)
         conn.close()
 
+    def test_paused_student_work_is_not_dispatched(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = _insert_pending_job(conn, ids["task_id"])
+        conn.execute(
+            "UPDATE students SET paused_at=datetime('now') WHERE id=?",
+            (ids["student_id"],),
+        )
+        conn.commit()
+        backend = AlwaysOkBackend()
+
+        with tempfile.TemporaryDirectory() as d:
+            dispatched = daemon.dispatch_pending_jobs(
+                conn, registry=FakeRegistry(backend),
+                prompt_builders={"student_work": _builder}, lab_dir=Path(d), budget_cap=10,
+            )
+
+        self.assertEqual(dispatched, 0)
+        self.assertEqual(backend.calls, 0)
+        self.assertEqual(
+            conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()["status"],
+            "pending",
+        )
+        conn.close()
+
 
 class SpecialHandlersTests(unittest.TestCase):
     def test_special_handler_takes_precedence_over_generic_path(self):

@@ -177,6 +177,9 @@ def dispatch_pending_jobs(
     candidate_rows = conn.execute(
         "SELECT id, kind, reviewer_index FROM jobs WHERE status='pending' "
         "AND (not_before IS NULL OR not_before <= datetime('now')) "
+        "AND NOT (kind='student_work' AND EXISTS ("
+        "SELECT 1 FROM students s WHERE s.task_id=jobs.target_id "
+        "AND s.paused_at IS NOT NULL)) "
         "ORDER BY attempts, created_at LIMIT ?",
         (max(budget_cap * 4, budget_cap),),
     ).fetchall()
