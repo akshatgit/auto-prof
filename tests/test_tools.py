@@ -382,6 +382,60 @@ class ApplyPatchTests(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertEqual((root / "x.py").read_text().strip(), "VALUE = 1")
 
+    _NEW_FILE_FAILING = (
+        "diff --git a/added.py b/added.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/added.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+ADDED = True\n"
+    )
+
+    def test_failing_patch_that_added_a_file_does_not_deadlock_the_tool(self):
+        """checkout only restores tracked files, so a reverted new file used
+        to linger as untracked and trip the dirty-tree guard forever after."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            with mock.patch.dict(os.environ, {tools.REPO_ROOT_ENV: str(root)}):
+                first = tools.run_apply_patch(self._NEW_FILE_FAILING)
+                self.assertEqual(first["status"], "error")
+                self.assertIn("REVERTED", first["output"])
+                self.assertFalse((root / "added.py").exists())
+                self.assertEqual(
+                    subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                   capture_output=True, text=True).stdout.strip(), "")
+                # The next patch must still be accepted, not refused as dirty.
+                second = tools.run_apply_patch(self._GOOD)
+            self.assertEqual(second["status"], "ok", second["output"])
+
+    def test_wrong_hunk_counts_are_recounted_rather_than_rejected(self):
+        """The commonest model diff defect: correct edit, wrong @@ arithmetic."""
+        miscounted = "--- a/x.py\n+++ b/x.py\n@@ -1,9 +1,9 @@\n-VALUE = 1\n+VALUE = 2\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            self.assertNotEqual(
+                subprocess.run(["git", "apply", "--check", "-"], cwd=root, input=miscounted,
+                               capture_output=True, text=True).returncode, 0,
+                "fixture must be one plain git apply rejects")
+            with mock.patch.dict(os.environ, {tools.REPO_ROOT_ENV: str(root)}):
+                result = tools.run_apply_patch(miscounted)
+            self.assertEqual(result["status"], "ok", result["output"])
+            self.assertEqual((root / "x.py").read_text().strip(), "VALUE = 2")
+
+    def test_truncated_patch_is_reported_as_malformed_not_out_of_date(self):
+        truncated = (
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
+            "@@ -17,10 +19,14 @@ def some"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            with mock.patch.dict(os.environ, {tools.REPO_ROOT_ENV: str(root)}):
+                result = tools.run_apply_patch(truncated)
+            self.assertEqual(result["status"], "error")
+            self.assertIn("truncated", result["output"])
+            self.assertEqual((root / "x.py").read_text().strip(), "VALUE = 1")
+
     def test_needs_a_configured_repository(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(tools.run_apply_patch("--- a\n+++ b\n")["status"], "error")

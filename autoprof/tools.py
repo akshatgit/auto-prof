@@ -747,6 +747,26 @@ def _git(root: Path, *args, timeout: int = 120):
     )
 
 
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
+
+
+def _has_dangling_hunk(diff: str) -> bool:
+    """True if any hunk header is not followed by at least one body line.
+
+    A body line starts with ' ', '+', '-' or '\\'. Anything else (another
+    header, a new file's `diff --git`, or end-of-input) means the hunk was
+    cut off mid-write.
+    """
+    lines = diff.splitlines()
+    for i, line in enumerate(lines):
+        if not _HUNK_HEADER_RE.match(line):
+            continue
+        body = lines[i + 1] if i + 1 < len(lines) else None
+        if body is None or not body[:1] in (" ", "+", "-", "\\"):
+            return True
+    return False
+
+
 def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
     """Apply a patch to the repository, verify it, and revert if it fails.
 
@@ -807,19 +827,63 @@ def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
                       "would delete them. Commit or stash them first.)",
         }
 
-    check = subprocess.run(
-        ["git", "apply", "--check", "-"], cwd=root, input=diff,
-        capture_output=True, text=True, timeout=60,
-    )
-    if check.returncode != 0:
+    # Reject a patch that stops mid-hunk BEFORE the tolerant ladder below.
+    # --recount would otherwise read a dangling `@@` header as a zero-line
+    # hunk, silently apply everything before it and drop the truncated tail --
+    # committing a half-written file that passes review as a whole one. A
+    # truncated response must fail loudly and be regenerated.
+    if _has_dangling_hunk(diff):
         return {
             "status": "error",
-            "output": "(patch does not apply cleanly -- regenerate it against current file "
-                      f"contents)\n{check.stderr.strip()[:800]}",
+            "output": "(patch is truncated -- it ends with a hunk header that has no body, so "
+                      "it was NOT applied. Your response was almost certainly cut off. Re-emit "
+                      "the patch as several smaller ones, each a complete diff.)",
         }
 
+    # Model-written diffs fail for two very different reasons, and only one
+    # of them is the model's fault. Wrong `@@` line counts and stray
+    # whitespace are bookkeeping errors in a patch whose intent is perfectly
+    # applicable; --recount recomputes the counts and looser context matching
+    # absorbs the rest. A genuinely wrong or truncated patch still fails every
+    # rung. Escalating costs a few --check runs and converts the single most
+    # common way a student stalls into a normal edit.
+    ladders = (
+        [],
+        ["--recount"],
+        ["--recount", "-C1"],
+        ["--recount", "-C1", "--ignore-whitespace"],
+    )
+    flags, check = None, None
+    for candidate in ladders:
+        check = subprocess.run(
+            ["git", "apply", "--check", *candidate, "-"], cwd=root, input=diff,
+            capture_output=True, text=True, timeout=60,
+        )
+        if check.returncode == 0:
+            flags = candidate
+            break
+
+    if flags is None:
+        stderr = check.stderr.strip() if check else ""
+        # "corrupt patch" means the diff was cut off or its body is
+        # unparseable -- regenerating against current contents will not help,
+        # so say the thing that actually will.
+        if "corrupt patch" in stderr or "without header" in stderr:
+            hint = (
+                "(patch is malformed or truncated, not merely out of date -- it was never "
+                "applied. Emit the diff in ONE block with a `diff --git a/P b/P` header per "
+                "file, and for a NEW file use the `new file mode` + `--- /dev/null` form. If "
+                "the file is large, write it in smaller separate patches.)"
+            )
+        else:
+            hint = (
+                "(patch does not apply cleanly -- readfile the target and regenerate the "
+                "diff against its CURRENT contents)"
+            )
+        return {"status": "error", "output": f"{hint}\n{stderr[:800]}"}
+
     applied = subprocess.run(
-        ["git", "apply", "-"], cwd=root, input=diff,
+        ["git", "apply", *flags, "-"], cwd=root, input=diff,
         capture_output=True, text=True, timeout=60,
     )
     if applied.returncode != 0:
@@ -838,7 +902,15 @@ def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
     if not passed:
         # Undo cleanly. The tree returns to exactly its prior state, so a
         # failed experiment costs nothing but the test run.
+        #
+        # `checkout` only restores TRACKED files, so a patch that added a new
+        # file left it behind as untracked. The dirty-tree guard above then
+        # refused every subsequent patch, and the student was deadlocked by
+        # its own reverted attempt -- with no way to see or clear the debris.
+        # `clean -fd` is safe precisely here: the guard proved the tree was
+        # clean beforehand, so anything untracked now came from this patch.
         _git(root, "checkout", "--", ".")
+        _git(root, "clean", "-fdq")
         return {
             "status": "error",
             "output": "(patch APPLIED, tests FAILED, change REVERTED -- the repository is "
