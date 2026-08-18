@@ -226,6 +226,19 @@ class RepoToolTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("return 42", result["output"])
 
+    def test_readfile_prefers_a_lab_specific_repository(self):
+        with tempfile.TemporaryDirectory() as global_dir, tempfile.TemporaryDirectory() as lab_dir:
+            (Path(global_dir) / "which.txt").write_text("global")
+            (Path(lab_dir) / "which.txt").write_text("lab nine")
+            env = {
+                tools.REPO_ROOT_ENV: global_dir,
+                f"{tools.REPO_ROOT_ENV}_9": lab_dir,
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                result = tools.run_readfile("which.txt", lab_id=9)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["output"], "lab nine")
+
     def test_readfile_refuses_paths_outside_the_root(self):
         with tempfile.TemporaryDirectory() as outer:
             root = Path(outer) / "repo"
@@ -316,6 +329,25 @@ class ApplyPatchTests(unittest.TestCase):
             branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                     cwd=root, capture_output=True, text=True).stdout.strip()
             self.assertEqual(branch, "auto-research")
+
+    def test_lab_specific_patch_uses_the_lab_workspace_and_branch(self):
+        with tempfile.TemporaryDirectory() as global_tmp, tempfile.TemporaryDirectory() as lab_tmp:
+            global_root = self._repo(global_tmp)
+            lab_root = self._repo(lab_tmp)
+            env = {
+                tools.REPO_ROOT_ENV: str(global_root),
+                f"{tools.REPO_ROOT_ENV}_9": str(lab_root),
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                result = tools.run_apply_patch(self._GOOD, lab_id=9)
+            self.assertEqual(result["status"], "ok", result["output"])
+            self.assertEqual((lab_root / "x.py").read_text().strip(), "VALUE = 2")
+            self.assertEqual((global_root / "x.py").read_text().strip(), "VALUE = 1")
+            branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=lab_root,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            self.assertEqual(branch, "auto-research-lab-9")
 
     def test_failing_patch_is_reverted_and_leaves_no_trace(self):
         """This is what makes self-modification survivable."""
@@ -434,6 +466,41 @@ class ExperimentTests(unittest.TestCase):
             result = tools.run_experiment('{"idea": "x"}', lab_id=2)
         self.assertEqual(result["status"], "error")
         self.assertIn("AUTOPROF_DB_PATH", result["output"])
+
+    def test_workspace_experiment_runs_only_for_the_scoped_lab(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "experiments").mkdir()
+            (root / "experiments" / "ok.py").write_text("print('REAL EXPERIMENT')\n")
+            env = {
+                f"{tools.REPO_ROOT_ENV}_9": d,
+                f"{tools.WORKSPACE_EXEC_LABS_ENV}_9": "9",
+            }
+            body = json.dumps({"command": ["python3", "experiments/ok.py"]})
+            with mock.patch.dict(os.environ, env, clear=True):
+                denied = tools.run_experiment(body, lab_id=8)
+                result = tools.run_experiment(body, lab_id=9)
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("REAL EXPERIMENT", result["output"])
+
+    def test_workspace_experiment_refuses_shell_and_path_escape(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "experiments").mkdir()
+            env = {
+                f"{tools.REPO_ROOT_ENV}_9": d,
+                f"{tools.WORKSPACE_EXEC_LABS_ENV}_9": "9",
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                shell = tools.run_experiment(
+                    json.dumps({"command": ["sh", "-c", "echo nope"]}), lab_id=9,
+                )
+                escaped = tools.run_experiment(
+                    json.dumps({"command": ["python3", "../outside.py"]}), lab_id=9,
+                )
+        self.assertEqual(shell["status"], "error")
+        self.assertEqual(escaped["status"], "error")
 
     def test_measure_reports_only_that_lab(self):
         """An experiment's numbers must never be contaminated by the other

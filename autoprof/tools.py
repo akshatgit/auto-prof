@@ -84,6 +84,14 @@ EXPERIMENT_LABS_ENV = "AUTOPROF_EXPERIMENT_LABS"
 EXPERIMENT_MAX_JOBS = 40
 EXPERIMENT_TIMEOUT = 3600
 
+# Labs that study executable systems need a persistent, reviewable workspace,
+# not only the short-lived verifier sandbox.  Workspace execution is opt-in per
+# lab and intentionally accepts only checked-in experiment scripts or the
+# workspace test runner; it is not a general shell.
+WORKSPACE_EXEC_LABS_ENV = "AUTOPROF_WORKSPACE_EXEC_LABS"
+WORKSPACE_EXEC_TIMEOUT = 900
+WORKSPACE_EXEC_OUTPUT_LIMIT = 40_000
+
 TOOL_DOCS = """You have these tools. To use one, emit a fenced block in your response; it will be \
 run and the result given back to you before you finalise your work.
 
@@ -128,6 +136,16 @@ The lab is created in the live environment and run by the main daemon, so result
 
 ```tool:experiment
 {{"measure": 7}}
+```
+
+For an executable-systems lab with a configured research workspace, `experiment` can instead run
+a checked-in Python experiment under `experiments/`, or the workspace's `run_tests.sh`. It never
+accepts a shell string. Commit the script with `apply_patch` first so the exact experiment remains
+reviewable, then run it:
+
+```tool:experiment
+{{"command": ["python3", "experiments/smoke.py", "--output", "artifacts/smoke"],
+  "timeout": 600}}
 ```
 
 Design experiments properly: vary ONE thing between arms, state the arms before you run them, and run a control. Do not report a comparison you did not actually run -- reviewers check.
@@ -183,14 +201,32 @@ class ToolError(RuntimeError):
     pass
 
 
-def _repo_root() -> Path | None:
+def _scoped_env(name: str, lab_id: int | None = None) -> str | None:
+    """Return a lab-specific setting when present, otherwise the global one.
+
+    Research subjects need different repositories and network evidence sources.  A
+    single process-global repository root made every lab either share one tree or
+    have no usable workspace at all.  The suffixed variables keep the existing
+    global configuration backward compatible while allowing, for example,
+    ``AUTOPROF_REPO_ROOT_9`` to configure only lab 9.
+    """
     import os
 
-    root = os.environ.get(REPO_ROOT_ENV)
+    if lab_id is not None:
+        scoped = os.environ.get(f"{name}_{lab_id}")
+        if scoped:
+            return scoped
+    return os.environ.get(name)
+
+
+def _repo_root(lab_id: int | None = None) -> Path | None:
+    import os
+
+    root = _scoped_env(REPO_ROOT_ENV, lab_id)
     return Path(root).resolve() if root else None
 
 
-def run_readfile(body: str) -> dict:
+def run_readfile(body: str, lab_id: int | None = None) -> dict:
     """Read a file from the lab's configured repository.
 
     Read-only and confined to the configured root: a research agent
@@ -198,7 +234,7 @@ def run_readfile(body: str) -> dict:
     out of it. Resolves symlinks before checking containment, so a link
     pointing outside the tree is refused rather than followed.
     """
-    root = _repo_root()
+    root = _repo_root(lab_id)
     if root is None:
         return {"status": "error", "output": f"(no repository configured; set {REPO_ROOT_ENV})"}
 
@@ -220,14 +256,12 @@ def run_readfile(body: str) -> dict:
     }
 
 
-def _fetch_allowlist() -> list[str]:
-    import os
-
-    raw = os.environ.get(FETCH_ALLOW_ENV, "")
+def _fetch_allowlist(lab_id: int | None = None) -> list[str]:
+    raw = _scoped_env(FETCH_ALLOW_ENV, lab_id) or ""
     return [h.strip().lower() for h in raw.split(",") if h.strip()]
 
 
-def run_fetch(body: str) -> dict:
+def run_fetch(body: str, lab_id: int | None = None) -> dict:
     """Fetch a URL over HTTP(S) and return the body.
 
     Allowlisted by host suffix, not open. Two reasons: a lab that can
@@ -244,7 +278,7 @@ def run_fetch(body: str) -> dict:
     import urllib.parse
     import urllib.request
 
-    allow = _fetch_allowlist()
+    allow = _fetch_allowlist(lab_id)
     if not allow:
         return {
             "status": "error",
@@ -320,6 +354,13 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
     import shutil
     import tempfile
 
+    try:
+        spec = json.loads(body)
+    except json.JSONDecodeError as e:
+        return {"status": "error", "output": f"(experiment spec is not valid JSON: {e})"}
+    if spec.get("command") is not None:
+        return run_workspace_experiment(spec, lab_id)
+
     allow = {x.strip() for x in os.environ.get(EXPERIMENT_LABS_ENV, "").split(",") if x.strip()}
     if not allow or (lab_id is not None and str(lab_id) not in allow):
         return {
@@ -327,11 +368,6 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
             "output": "(this lab may not run experiments; set "
                       f"{EXPERIMENT_LABS_ENV} to a comma-separated list of lab ids)",
         }
-
-    try:
-        spec = json.loads(body)
-    except json.JSONDecodeError as e:
-        return {"status": "error", "output": f"(experiment spec is not valid JSON: {e})"}
     if spec.get("measure") is not None:
         db_path = os.environ.get("AUTOPROF_DB_PATH")
         if not db_path:
@@ -394,6 +430,97 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
             "`experiment` again later with {\"measure\": <lab id>} to collect outcomes.\n"
             f"{create.stdout[-600:]}"
         ),
+    }
+
+
+def run_workspace_experiment(spec: dict, lab_id: int | None) -> dict:
+    """Run one checked-in experiment from an explicitly enabled lab workspace.
+
+    The command surface is deliberately narrow.  Students first persist code
+    through ``apply_patch`` (which runs tests and commits it), then may execute
+    only ``run_tests.sh`` or a Python file below ``experiments/``.  This makes
+    the code that touched an external system inspectable after the run and
+    avoids turning a model response into an unrestricted shell command.
+    """
+    import os
+
+    allowed = {
+        x.strip()
+        for x in (_scoped_env(WORKSPACE_EXEC_LABS_ENV, lab_id) or "").split(",")
+        if x.strip()
+    }
+    if lab_id is None or (str(lab_id) not in allowed and "*" not in allowed):
+        return {
+            "status": "error",
+            "output": "(this lab may not execute workspace experiments; configure "
+                      f"{WORKSPACE_EXEC_LABS_ENV}_{lab_id})",
+        }
+
+    root = _repo_root(lab_id)
+    if root is None:
+        return {"status": "error", "output": "(this lab has no configured research workspace)"}
+
+    command = spec.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
+        return {"status": "error", "output": "(command must be a non-empty JSON string array)"}
+
+    if command[0] == "./run_tests.sh" and len(command) == 1:
+        target = (root / "run_tests.sh").resolve()
+        argv = [str(target)]
+    elif command[0] == "python3" and len(command) >= 2 and not command[1].startswith("-"):
+        target = (root / command[1]).resolve()
+        experiments = (root / "experiments").resolve()
+        if experiments not in target.parents or target.suffix != ".py":
+            return {
+                "status": "error",
+                "output": "(Python experiment must be a .py file below experiments/)",
+            }
+        argv = [sys.executable, str(target), *command[2:]]
+    else:
+        return {
+            "status": "error",
+            "output": "(allowed commands: ./run_tests.sh, or python3 experiments/<file>.py ...)",
+        }
+
+    if root != target and root not in target.parents:
+        return {"status": "error", "output": "(experiment path leaves the research workspace)"}
+    if not target.is_file():
+        return {"status": "error", "output": f"({target.relative_to(root)}: not a file)"}
+
+    try:
+        requested_timeout = int(spec.get("timeout", WORKSPACE_EXEC_TIMEOUT))
+    except (TypeError, ValueError):
+        return {"status": "error", "output": "(timeout must be an integer number of seconds)"}
+    timeout = max(1, min(requested_timeout, WORKSPACE_EXEC_TIMEOUT))
+
+    # Do not leak daemon/provider credentials into research scripts.  Keep the
+    # ordinary process environment needed for Docker and language runtimes, but
+    # drop names conventionally used for secrets and all Auto-Prof internals.
+    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "APIKEY")
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AUTOPROF_")
+        and not any(marker in key.upper() for marker in sensitive_markers)
+    }
+    try:
+        proc = subprocess.run(
+            argv, cwd=root, capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, env=env,
+        )
+    except subprocess.TimeoutExpired as e:
+        partial = ((e.stdout or "") + (e.stderr or ""))[-2000:]
+        return {
+            "status": "timeout",
+            "output": f"(workspace experiment exceeded {timeout}s)\n{partial}",
+        }
+    except OSError as e:
+        return {"status": "error", "output": f"(could not run workspace experiment: {e})"}
+
+    output = ((proc.stdout or "") + (proc.stderr or ""))[:WORKSPACE_EXEC_OUTPUT_LIMIT]
+    status = "ok" if proc.returncode == 0 else "error"
+    return {
+        "status": status,
+        "output": f"[exit={proc.returncode} cwd={root}]\n{output}".rstrip(),
     }
 
 
@@ -620,7 +747,7 @@ def _git(root: Path, *args, timeout: int = 120):
     )
 
 
-def run_apply_patch(body: str) -> dict:
+def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
     """Apply a patch to the repository, verify it, and revert if it fails.
 
     Real self-improvement needs the change to actually land, but an agent
@@ -635,7 +762,7 @@ def run_apply_patch(body: str) -> dict:
     run and leaves no trace -- which is what makes "if anything breaks we
     fix it" true rather than aspirational.
     """
-    root = _repo_root()
+    root = _repo_root(lab_id)
     if root is None:
         return {"status": "error", "output": f"(no repository configured; set {REPO_ROOT_ENV})"}
 
@@ -647,7 +774,10 @@ def run_apply_patch(body: str) -> dict:
 
     import os
 
-    branch = os.environ.get(APPLY_BRANCH_ENV, "auto-research")
+    branch = os.environ.get(
+        f"{APPLY_BRANCH_ENV}_{lab_id}" if lab_id is not None else APPLY_BRANCH_ENV,
+        os.environ.get(APPLY_BRANCH_ENV, f"auto-research-lab-{lab_id}" if lab_id is not None else "auto-research"),
+    )
     head = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     if head.returncode != 0:
         return {"status": "error", "output": f"(not a git repository: {head.stderr.strip()[:200]})"}
@@ -1024,9 +1154,9 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
         elif tool == "visualize":
             result = run_visualizer(body)
         elif tool == "readfile":
-            result = run_readfile(body)
+            result = run_readfile(body, lab_id)
         elif tool == "fetch":
-            result = run_fetch(body)
+            result = run_fetch(body, lab_id)
         elif tool == "experiment":
             result = run_experiment(body, lab_id)
         elif tool == "record":
@@ -1034,7 +1164,7 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
         elif tool == "propose_patch":
             result = run_propose_patch(body)
         else:
-            result = run_apply_patch(body)
+            result = run_apply_patch(body, lab_id)
 
         cur = conn.execute(
             "INSERT INTO tool_runs (lab_id, task_id, student_id, tool, input_path, "
