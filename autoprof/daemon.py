@@ -112,6 +112,35 @@ def _fail_unhandled(conn: sqlite3.Connection, job_id: int, error: Exception) -> 
     return "failed"
 
 
+def _job_lab_id(conn: sqlite3.Connection, row) -> int | None:
+    """Resolve the owning lab for backend policy without denormalizing jobs."""
+    target_type, target_id = row["target_type"], row["target_id"]
+    if target_type == "lab":
+        return target_id
+    queries = {
+        "task": "SELECT lab_id FROM tasks WHERE id=?",
+        "paper": (
+            "SELECT tasks.lab_id FROM papers JOIN tasks ON tasks.id=papers.task_id "
+            "WHERE papers.id=?"
+        ),
+        "professor": "SELECT lab_id FROM professors WHERE id=?",
+        "student": (
+            "SELECT professors.lab_id FROM students "
+            "JOIN professors ON professors.id=students.professor_id WHERE students.id=?"
+        ),
+        "defense": (
+            "SELECT professors.lab_id FROM defenses "
+            "JOIN students ON students.id=defenses.student_id "
+            "JOIN professors ON professors.id=students.professor_id WHERE defenses.id=?"
+        ),
+    }
+    query = queries.get(target_type)
+    if query is None:
+        return None
+    owner = conn.execute(query, (target_id,)).fetchone()
+    return owner["lab_id"] if owner else None
+
+
 def _execute_one(
     db_path, job_id: int, kind: str, registry, prompt_builders, lab_dir, special_handlers,
     reviewer_index: int | None = None,
@@ -127,7 +156,10 @@ def _execute_one(
     conn = db_module.connect(db_path)
     try:
         try:
-            backend = registry.get_backend(kind, reviewer_index)
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            backend = registry.get_backend(
+                kind, reviewer_index, lab_id=_job_lab_id(conn, row)
+            )
         except Exception as e:  # noqa: BLE001
             _fail_unhandled(conn, job_id, e)
             return "failed"
@@ -175,7 +207,8 @@ def dispatch_pending_jobs(
     # untried work means a struggling job still makes progress -- it just
     # yields to jobs that have not had their turn yet.
     candidate_rows = conn.execute(
-        "SELECT id, kind, reviewer_index FROM jobs WHERE status='pending' "
+        "SELECT id, kind, reviewer_index, target_type, target_id "
+        "FROM jobs WHERE status='pending' "
         "AND (not_before IS NULL OR not_before <= datetime('now')) "
         "AND NOT (kind='student_work' AND EXISTS ("
         "SELECT 1 FROM students s WHERE s.task_id=jobs.target_id "
@@ -211,7 +244,8 @@ def dispatch_pending_jobs(
         # and it used to take the whole loop down with it.
         try:
             backend = registry.get_backend(
-                candidate["kind"], candidate["reviewer_index"]
+                candidate["kind"], candidate["reviewer_index"],
+                lab_id=_job_lab_id(conn, candidate),
             )
         except Exception as e:  # noqa: BLE001 -- one job's problem, not the loop's
             _fail_unhandled(conn, candidate["id"], e)

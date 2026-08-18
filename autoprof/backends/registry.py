@@ -43,6 +43,10 @@ BACKEND_CLASSES: dict[str, type[Backend]] = {
     "codex": CodexBackend,
     "claude": ClaudeBackend,
     "ollama_cloud": OllamaCloudBackend,
+    # A separate registry identity lets review use a different model from
+    # generation while the Backend's provider name remains ollama_cloud,
+    # so a 429 still opens one shared Ollama circuit breaker.
+    "ollama_cloud_review": OllamaCloudBackend,
 }
 
 # The review PANEL: which backend runs reviewer #1, #2, #3 ...
@@ -56,19 +60,31 @@ BACKEND_CLASSES: dict[str, type[Backend]] = {
 # decorrelates the panel's errors, which is the only thing that makes the
 # vote informative.
 #
-# The panel cycles if there are more reviewers than entries, so a 5-member
-# defense panel off a 2-entry panel is codex, claude, codex, claude, codex
-# -- never all one family.
-DEFAULT_REVIEW_PANEL = ("codex", "claude", "codex")
+# The panel cycles if there are more reviewers than entries. The Ollama slot
+# uses a model family distinct from generation, and the panel never collapses
+# to one family.
+DEFAULT_REVIEW_PANEL = ("codex", "ollama_cloud_review", "codex")
 
 
-def review_panel(config: dict, env: dict) -> list[str]:
-    """Ordered backend names for reviewers 1..N. Env wins over config."""
-    raw = env.get("AUTOPROF_REVIEW_PANEL") or ""
+def review_panel(config: dict, env: dict, lab_id: int | None = None) -> list[str]:
+    """Ordered backend names for reviewers 1..N.
+
+    A lab-scoped environment/config value precedes the global panel. This
+    lets one commissioned lab require a particular independent panel without
+    silently changing the reviewers judging every other active lab.
+    """
+    scoped = f"AUTOPROF_REVIEW_PANEL_{lab_id}" if lab_id is not None else None
+    raw = (env.get(scoped) if scoped else None) or env.get("AUTOPROF_REVIEW_PANEL") or ""
     if raw.strip():
         names = [part.strip() for part in raw.split(",") if part.strip()]
         if names:
             return names
+    if lab_id is not None:
+        labs = config.get("labs", {})
+        lab_config = labs.get(str(lab_id), {}) if isinstance(labs, dict) else {}
+        configured = lab_config.get("review_panel") if isinstance(lab_config, dict) else None
+        if configured:
+            return [str(name) for name in configured]
     configured = config.get("backends", {}).get("review_panel")
     if configured:
         return [str(name) for name in configured]
@@ -84,7 +100,8 @@ def classify_kind(kind: str) -> str:
 
 
 def resolve_backend_name(
-    kind: str, config: dict, env: dict, reviewer_index: int | None = None
+    kind: str, config: dict, env: dict, reviewer_index: int | None = None,
+    lab_id: int | None = None,
 ) -> str:
     per_kind_env_key = f"AUTOPROF_BACKEND_{kind.upper()}"
     if env.get(per_kind_env_key):
@@ -100,7 +117,7 @@ def resolve_backend_name(
     # pinning a kind to one backend still works) but above the category
     # default, because a mixed panel IS the review default.
     if category == "review" and reviewer_index:
-        panel = review_panel(config, env)
+        panel = review_panel(config, env, lab_id=lab_id)
         if panel:
             return panel[(reviewer_index - 1) % len(panel)]
 
@@ -125,17 +142,24 @@ def backend_options(name: str, config: dict, env: dict) -> dict:
     source. Same precedence as everything else here: env, then config,
     then the class default.
     """
-    if name != "ollama_cloud":
+    if name not in {"ollama_cloud", "ollama_cloud_review"}:
         return {}
     opts = {}
-    model = env.get("AUTOPROF_OLLAMA_MODEL") or config.get("backends", {}).get("ollama_model")
+    backends = config.get("backends", {})
+    if name == "ollama_cloud_review":
+        model = (
+            env.get("AUTOPROF_OLLAMA_REVIEW_MODEL")
+            or backends.get("ollama_review_model")
+        )
+    else:
+        model = env.get("AUTOPROF_OLLAMA_MODEL") or backends.get("ollama_model")
     if model:
         opts["model"] = model
     # The backend reads AUTOPROF_OLLAMA_TIMEOUT itself; this adds the
     # config-file layer so the ceiling is visible next to the model it
     # has to accommodate -- a slower model needs a longer one, and the two
     # settings drifting apart is what stranded two tasks.
-    raw = config.get("backends", {}).get("ollama_timeout")
+    raw = backends.get("ollama_timeout")
     if raw is not None and not env.get("AUTOPROF_OLLAMA_TIMEOUT"):
         try:
             opts["timeout"] = float(raw)
@@ -166,8 +190,12 @@ class Registry:
         self.backend_classes = backend_classes if backend_classes is not None else BACKEND_CLASSES
         self._instances: dict[str, Backend] = {}
 
-    def get_backend(self, kind: str, reviewer_index: int | None = None) -> Backend:
-        name = resolve_backend_name(kind, self.config, self.env, reviewer_index)
+    def get_backend(
+        self, kind: str, reviewer_index: int | None = None, lab_id: int | None = None
+    ) -> Backend:
+        name = resolve_backend_name(
+            kind, self.config, self.env, reviewer_index, lab_id=lab_id
+        )
         if name not in self._instances:
             cls = self.backend_classes.get(name)
             if cls is None:

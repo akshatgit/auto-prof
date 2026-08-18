@@ -18,12 +18,12 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import jobs, tools
+from . import config, jobs, tools
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
 
-MAX_TOOL_ROUNDS = 3
+MAX_TOOL_ROUNDS = config.DEFAULT_MAX_TOOL_ROUNDS
 
 RESPONSE_PROMPT_TEMPLATE = """You are the author of the paper below, which is under peer \
 review. One reviewer has asked you for something before they will commit to a verdict.
@@ -105,7 +105,7 @@ def execute_author_response_job(
     # Bounded tool loop, same shape as student_work: the point of this job
     # is that the authors can actually run what was asked.
     transcript = prompt
-    for _ in range(MAX_TOOL_ROUNDS):
+    for _ in range(config.max_tool_rounds(lab_id=task["lab_id"])):
         calls = tools.parse_tool_calls(result.text)
         if not calls:
             break

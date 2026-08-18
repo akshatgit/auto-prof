@@ -112,7 +112,7 @@ class AutoRequestsLabReviewTests(unittest.TestCase):
 
     def _patched_registry(self):
         class _Reg:
-            def get_backend(self, kind, reviewer_index=None):
+            def get_backend(self, kind, reviewer_index=None, lab_id=None):
                 return ScriptedBackend(
                     BackendResult(
                         text=json.dumps(

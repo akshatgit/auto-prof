@@ -73,6 +73,26 @@ class ResolveBackendNameTests(unittest.TestCase):
         self.assertEqual(DEFAULT_BACKEND_FOR_CATEGORY["generation"], "ollama_cloud")
         self.assertEqual(DEFAULT_BACKEND_FOR_CATEGORY["review"], "codex")
 
+    def test_lab_scoped_review_panel_precedes_global_panel(self):
+        env = {
+            "AUTOPROF_REVIEW_PANEL": "codex,ollama_cloud_review,codex",
+            "AUTOPROF_REVIEW_PANEL_9": "codex,claude,codex",
+        }
+        self.assertEqual(
+            resolve_backend_name("paper_review", {}, env, 2, lab_id=9), "claude"
+        )
+        self.assertEqual(
+            resolve_backend_name("paper_review", {}, env, 2, lab_id=8),
+            "ollama_cloud_review",
+        )
+
+    def test_lab_scoped_panel_does_not_affect_generation(self):
+        env = {"AUTOPROF_REVIEW_PANEL_9": "codex,claude,codex"}
+        self.assertEqual(
+            resolve_backend_name("student_work", {}, env, 2, lab_id=9),
+            "ollama_cloud",
+        )
+
 
 class LoadConfigTests(unittest.TestCase):
     def test_missing_path_returns_empty_dict(self):
@@ -176,6 +196,40 @@ class OllamaModelSelectionTests(unittest.TestCase):
     def test_registry_threads_the_model_into_the_instance(self):
         reg = registry.Registry(config={"backends": {"ollama_model": "deepseek-v4-pro"}}, env={})
         self.assertEqual(reg.get_backend("student_work").model, "deepseek-v4-pro")
+
+    def test_review_model_is_separate_from_generation_model(self):
+        config = {
+            "backends": {
+                "ollama_model": "minimax-m3",
+                "ollama_review_model": "deepseek-v4-pro",
+            }
+        }
+        self.assertEqual(
+            registry.backend_options("ollama_cloud_review", config, {}),
+            {"model": "deepseek-v4-pro"},
+        )
+
+    def test_review_model_env_beats_config(self):
+        opts = registry.backend_options(
+            "ollama_cloud_review",
+            {"backends": {"ollama_review_model": "from-config"}},
+            {"AUTOPROF_OLLAMA_REVIEW_MODEL": "from-env"},
+        )
+        self.assertEqual(opts, {"model": "from-env"})
+
+    def test_registry_caches_generation_and_review_ollama_separately(self):
+        config = {
+            "backends": {
+                "ollama_model": "minimax-m3",
+                "ollama_review_model": "deepseek-v4-pro",
+            }
+        }
+        reg = registry.Registry(config=config, env={})
+        generation = reg.get_backend("student_work")
+        review = reg.get_backend("paper_review", reviewer_index=2)
+        self.assertIsNot(generation, review)
+        self.assertEqual(generation.model, "minimax-m3")
+        self.assertEqual(review.model, "deepseek-v4-pro")
 
     def test_timeout_is_configurable(self):
         # 280s was a hardcoded constructor default. When generation moved

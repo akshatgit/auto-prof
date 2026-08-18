@@ -38,7 +38,7 @@ class FakeRegistry:
     def __init__(self, backend):
         self.backend = backend
 
-    def get_backend(self, kind, reviewer_index=None):
+    def get_backend(self, kind, reviewer_index=None, lab_id=None):
         return self.backend
 
 
@@ -181,6 +181,40 @@ class DispatchPendingJobsTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_paper_review_backend_receives_owning_lab_id(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        paper_id = conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'P', 'in_review', 1)",
+            (ids["task_id"], ids["student_id"]),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status, review_round, reviewer_index) "
+            "VALUES ('paper_review', 'paper', ?, 'pending', 1, 2)",
+            (paper_id,),
+        )
+        conn.commit()
+        seen = []
+
+        class CapturingRegistry:
+            def get_backend(self, kind, reviewer_index=None, lab_id=None):
+                seen.append((kind, reviewer_index, lab_id))
+                return AlwaysOkBackend()
+
+        with tempfile.TemporaryDirectory() as d:
+            daemon.dispatch_pending_jobs(
+                conn,
+                registry=CapturingRegistry(),
+                prompt_builders={},
+                lab_dir=Path(d),
+                budget_cap=1,
+                special_handlers={"paper_review": lambda *args: "done"},
+            )
+
+        self.assertEqual(seen, [("paper_review", 2, ids["lab_id"])])
+        conn.close()
+
 
 class SpecialHandlersTests(unittest.TestCase):
     def test_special_handler_takes_precedence_over_generic_path(self):
@@ -305,7 +339,7 @@ class OnTickCallbackTests(unittest.TestCase):
 
 
 class _NullRegistry:
-    def get_backend(self, kind, reviewer_index=None):
+    def get_backend(self, kind, reviewer_index=None, lab_id=None):
         raise AssertionError("no jobs should be dispatched in these tests")
 
 
@@ -329,7 +363,7 @@ class DispatchOrderingTests(unittest.TestCase):
         dispatched = []
 
         class _Reg:
-            def get_backend(self, kind, reviewer_index=None):
+            def get_backend(self, kind, reviewer_index=None, lab_id=None):
                 return SimpleNamespace(name="fake")
 
         def handler(conn_, job_id, backend, lab_dir):
@@ -351,7 +385,7 @@ class HandlerCrashTests(unittest.TestCase):
     every lab halted until a human noticed."""
 
     class _Reg:
-        def get_backend(self, kind, reviewer_index=None):
+        def get_backend(self, kind, reviewer_index=None, lab_id=None):
             return SimpleNamespace(name="fake")
 
     def _job(self, conn, ids):
@@ -419,7 +453,7 @@ class UnknownKindTests(unittest.TestCase):
         conn.commit()
 
         class _Reg:
-            def get_backend(self, kind, reviewer_index=None):
+            def get_backend(self, kind, reviewer_index=None, lab_id=None):
                 raise ValueError(f"unknown job kind: {kind!r}")
 
         dispatched = daemon.dispatch_pending_jobs(
@@ -445,7 +479,7 @@ class UnknownKindTests(unittest.TestCase):
         seen = []
 
         class _Reg:
-            def get_backend(self, kind, reviewer_index=None):
+            def get_backend(self, kind, reviewer_index=None, lab_id=None):
                 if kind == "student_work":
                     return SimpleNamespace(name="fake")
                 raise ValueError(f"unknown job kind: {kind!r}")
@@ -463,7 +497,7 @@ class ConcurrentDispatchTests(unittest.TestCase):
     from locking: claim_job is one atomic conditional UPDATE."""
 
     class _Reg:
-        def get_backend(self, kind, reviewer_index=None):
+        def get_backend(self, kind, reviewer_index=None, lab_id=None):
             return SimpleNamespace(name="fake")
 
     def _db(self, tmp, n_jobs):

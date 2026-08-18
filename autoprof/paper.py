@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import assumptions, db, ingest, jobs, references, supervision, tools
+from . import assumptions, config, db, ingest, jobs, references, supervision, tools
 from .artifacts import checkpoint_artifact, write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -39,7 +39,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # being eligible for a dissertation.
 VALID_PAPER_STATUSES = ("draft", "in_review", "accepted", "rejected", "superseded")
 
-MAX_TOOL_ROUNDS = 3
+MAX_TOOL_ROUNDS = config.DEFAULT_MAX_TOOL_ROUNDS
 
 _FENCE_RE = re.compile(r"^```(?:html)?\s*(.*?)\s*```$", re.DOTALL)
 
@@ -322,7 +322,7 @@ def execute_student_work_job(
     # back, let them revise. Capped at MAX_TOOL_ROUNDS so a student cannot
     # spend a job cycling on tools instead of producing work.
     prompt_so_far = work_prompt
-    for _ in range(MAX_TOOL_ROUNDS):
+    for _ in range(config.max_tool_rounds(lab_id=lab["id"])):
         calls = tools.parse_tool_calls(result.text)
         if not calls:
             break

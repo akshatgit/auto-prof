@@ -66,6 +66,11 @@ DEFAULT_MAX_COLLABORATION_ROUNDS = 6
 # Failed lab-review rounds before a lab waits for human intervention.
 DEFAULT_MAX_LAB_REVIEW_ROUNDS = 8
 
+# Model/tool turns inside one student-work or author-response job. This is
+# separate from supervision rounds: it lets a student finish an inspect ->
+# patch -> test cycle before handing incomplete memory back to the professor.
+DEFAULT_MAX_TOOL_ROUNDS = 3
+
 _CONFIG_PATH = db.REPO_ROOT / "autoprof.toml"
 
 
@@ -304,6 +309,32 @@ def max_lab_review_rounds(
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_LAB_REVIEW_ROUNDS
+
+
+def max_tool_rounds(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
+    """Model/tool turns inside one tool-using research job."""
+    env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_TOOL_ROUNDS", "max_tool_rounds",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
+    raw = env.get("AUTOPROF_MAX_TOOL_ROUNDS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_tool_rounds")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_TOOL_ROUNDS
 
 
 def max_tasks_per_decomposition(config_path: Path | None = None, env: dict | None = None) -> int:

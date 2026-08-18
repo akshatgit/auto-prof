@@ -86,6 +86,7 @@ class MaxAcceptedPapersTests(unittest.TestCase):
             ("AUTOPROF_MAX_REVIEW_EXCHANGES_9", config.max_review_exchanges),
             ("AUTOPROF_MAX_COLLABORATION_ROUNDS_9", config.max_collaboration_rounds),
             ("AUTOPROF_MAX_LAB_REVIEW_ROUNDS_9", config.max_lab_review_rounds),
+            ("AUTOPROF_MAX_TOOL_ROUNDS_9", config.max_tool_rounds),
         ]
         for name, getter in names_and_getters:
             with self.subTest(name=name):
