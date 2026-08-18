@@ -135,7 +135,9 @@ class SupervisionVerdictTests(unittest.TestCase):
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
-            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda: 2):
+            with mock.patch.object(
+                supervision.config, "max_supervision_rounds", lambda **_: 2
+            ):
                 self._run(conn, ids, lab_dir, _payload("continue"))
                 self._run(conn, ids, lab_dir, _payload("continue"))
 
@@ -157,7 +159,9 @@ class SupervisionVerdictTests(unittest.TestCase):
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
-            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda: 2):
+            with mock.patch.object(
+                supervision.config, "max_supervision_rounds", lambda **_: 2
+            ):
                 self._run(conn, ids, lab_dir, _payload("continue"))
                 self._run(conn, ids, lab_dir, _payload("continue"))  # forced 'ready'
 
@@ -184,7 +188,9 @@ class SupervisionVerdictTests(unittest.TestCase):
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
-            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda: 3):
+            with mock.patch.object(
+                supervision.config, "max_supervision_rounds", lambda **_: 3
+            ):
                 for _ in range(3):
                     self._run(conn, ids, lab_dir, _payload("continue"))
 
@@ -192,6 +198,23 @@ class SupervisionVerdictTests(unittest.TestCase):
             "SELECT verdict FROM supervisions ORDER BY round"
         )]
         self.assertEqual(verdicts, ["continue", "continue", "ready"])
+        conn.close()
+
+    def test_zero_scoped_cap_never_forces_ready(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            with mock.patch.object(
+                supervision.config, "max_supervision_rounds", lambda **_: 0
+            ):
+                for _ in range(4):
+                    self._run(conn, ids, lab_dir, _payload("continue"))
+
+        verdicts = [r["verdict"] for r in conn.execute(
+            "SELECT verdict FROM supervisions ORDER BY round"
+        )]
+        self.assertEqual(verdicts, ["continue"] * 4)
         conn.close()
 
 

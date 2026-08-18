@@ -122,8 +122,10 @@ def execute_paper_review_job(
     if not paper_file.exists():
         return jobs.fail_job(conn, job_id, lease_id, f"paper file missing: {paper['path']}")
 
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
     prompt = build_review_prompt(paper_file.read_text()) + exchange_transcript(
-        conn, paper["id"], row["review_round"], row["reviewer_index"], lab_dir
+        conn, paper["id"], row["review_round"], row["reviewer_index"], lab_dir,
+        lab_id=task["lab_id"],
     )
     result = jobs.run_with_session(conn, job_id, backend, prompt)
 
@@ -138,8 +140,6 @@ def execute_paper_review_job(
     # Last match, not first: a reviewer will sometimes quote the required
     # format while explaining itself before emitting the real verdict.
     matches = _VERDICT_RE.findall(result.text)
-    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
-
     if not matches:
         return jobs.fail_job(
             conn, job_id, lease_id, f"no VERDICT line found in review output: {result.text[:300]}"
@@ -176,7 +176,8 @@ def execute_paper_review_job(
     opened = False
     if request:
         used = _exchanges_used(conn, paper["id"], row["review_round"], row["reviewer_index"])
-        if used < config.max_review_exchanges():
+        exchange_limit = config.max_review_exchanges(lab_id=task["lab_id"])
+        if not exchange_limit or used < exchange_limit:
             _open_exchange(
                 conn, paper, task, row, used + 1, request.group(1).strip(), lab_dir, job_id
             )
@@ -237,7 +238,7 @@ def _open_exchange(conn, paper, task, row, exchange_round, request_text, lab_dir
 
 
 def exchange_transcript(conn, paper_id: int, review_round: int, reviewer_index: int,
-                        lab_dir: Path) -> str:
+                        lab_dir: Path, lab_id: int | None = None) -> str:
     """This reviewer's own request/response history, for its next turn.
 
     Scoped to one reviewer on purpose: showing reviewer 2 what reviewer 1
@@ -261,12 +262,25 @@ def exchange_transcript(conn, paper_id: int, review_round: int, reviewer_index: 
             path = lab_dir / r["response_path"]
             resp = path.read_text(errors="replace") if path.exists() else "(response missing)"
             parts.append(f"--- The authors answered ---\n{resp}")
-    remaining = config.max_review_exchanges() - len(rows)
-    closing = (
-        "You have no exchanges left: return a VERDICT on what you now have."
-        if remaining <= 0 else
-        f"You may make {remaining} further request if you genuinely need one."
-    )
+    if lab_id is None:
+        owner = conn.execute(
+            "SELECT tasks.lab_id FROM papers JOIN tasks ON tasks.id=papers.task_id "
+            "WHERE papers.id=?", (paper_id,),
+        ).fetchone()
+        lab_id = owner["lab_id"] if owner else None
+    exchange_limit = config.max_review_exchanges(lab_id=lab_id)
+    if exchange_limit == 0:
+        closing = (
+            "This lab has no fixed exchange cap. Make another request only when genuinely "
+            "needed to reach an evidence-based verdict."
+        )
+    else:
+        remaining = exchange_limit - len(rows)
+        closing = (
+            "You have no exchanges left: return a VERDICT on what you now have."
+            if remaining <= 0 else
+            f"You may make {remaining} further request if you genuinely need one."
+        )
     return (
         "\n\nYou already corresponded with the authors about this document. "
         "Judge the answers as evidence -- an answer that dodges the question, or a "
@@ -347,6 +361,7 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
     ).fetchone()["n"]
 
     paper = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (paper["task_id"],)).fetchone()
     passed = strong >= STRONG_ACCEPT_THRESHOLD
 
     conn.execute(
@@ -373,7 +388,10 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         ).fetchone()
         if task_row:
             collaboration.request_scan(conn, task_row["lab_id"])
-    elif _accepted_paper_count(conn, paper["task_id"]) >= config.max_accepted_papers():
+    elif (
+        (accepted_limit := config.max_accepted_papers(lab_id=task["lab_id"]))
+        and _accepted_paper_count(conn, paper["task_id"]) >= accepted_limit
+    ):
         # The lab has what it needs; the revise loop stops here and the
         # professor decides what becomes of the task (§3.3). Without this
         # a rejected paper past the target was simply a dead end.
@@ -386,7 +404,10 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         ).fetchone()
         if task_row:
             collaboration.request_scan(conn, task_row["lab_id"])
-    elif _rejected_paper_count(conn, paper["task_id"]) >= config.max_rejected_papers():
+    elif (
+        (rejected_limit := config.max_rejected_papers(lab_id=task["lab_id"]))
+        and _rejected_paper_count(conn, paper["task_id"]) >= rejected_limit
+    ):
         # Terminal: this task has spent its attempts. Neither existing cap
         # can stop this case -- max_accepted_papers counts successes and a
         # failing task has none, while the supervision cap forces a

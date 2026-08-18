@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -365,6 +366,28 @@ class RevisionEnqueueTests(unittest.TestCase):
             "SELECT status FROM tasks WHERE id = ?", (ids["task_id"],)
         ).fetchone()
         self.assertNotEqual(task["status"], "abandoned")
+        conn.close()
+
+    def test_scoped_zero_rejection_cap_keeps_revising(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+            paper_review.config, "max_rejected_papers", lambda **_: 0
+        ):
+            lab_dir = Path(d)
+            self._reject(conn, ids, lab_dir)
+            self._reject(conn, ids, lab_dir)
+
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (ids["task_id"],)
+        ).fetchone()
+        self.assertNotEqual(task["status"], "abandoned")
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'"
+            ).fetchone()[0],
+            2,
+        )
         conn.close()
 
     def test_rejections_on_another_task_do_not_count(self):

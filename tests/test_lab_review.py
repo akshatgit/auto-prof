@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from autoprof import lab_review, watch_cli
 from autoprof.backends.base import Backend, BackendResult
@@ -391,7 +392,8 @@ class AutoRevisionTests(unittest.TestCase):
 class ReviseLoopCapTests(unittest.TestCase):
     """The revise->review cycle had no stop condition. Each turn costs 3
     reviews plus a revision, and lab #3 burned 12 reviews oscillating just
-    under the bar with nothing that could ever halt it."""
+    under the bar with nothing that could ever halt it. The current cap
+    permits eight rounds before requiring human intervention."""
 
     def _job(self, conn, lab_id):
         cur = conn.execute(
@@ -430,6 +432,19 @@ class ReviseLoopCapTests(unittest.TestCase):
             "SELECT COUNT(*) FROM jobs WHERE kind='lab_revise' AND target_id=?", (lab_id,)
         ).fetchone()[0]
         self.assertEqual(queued, 0)
+        conn.close()
+
+    def test_scoped_zero_cap_keeps_revising(self):
+        conn = fresh_db()
+        lab_id = _seed_lab(conn)["lab_id"]
+        with mock.patch.object(
+            lab_review.config, "max_lab_review_rounds", lambda **_: 0
+        ):
+            self._fail_round(conn, lab_id, 100)
+        queued = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE kind='lab_revise' AND target_id=?", (lab_id,)
+        ).fetchone()[0]
+        self.assertEqual(queued, 1)
         conn.close()
 
     def test_exhaustion_is_announced_so_a_human_sees_it(self):

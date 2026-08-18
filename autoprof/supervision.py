@@ -238,10 +238,14 @@ def execute_professor_supervision_job(
             conn, job_id, lease_id, f"supervision verdict {verdict!r} not one of {VALID_VERDICTS}"
         )
 
-    max_rounds = config.max_supervision_rounds()
+    max_rounds = config.max_supervision_rounds(lab_id=lab["id"])
     attempt = _current_attempt(conn, task["id"])
     forced = False
-    if verdict == "continue" and _round_within_attempt(conn, task["id"], attempt) >= max_rounds:
+    if (
+        verdict == "continue"
+        and max_rounds
+        and _round_within_attempt(conn, task["id"], attempt) >= max_rounds
+    ):
         # Terminate a loop that isn't converging -- but by writing up what
         # exists, not by discarding it. The research is real work; only the
         # supervisor's appetite for more rounds has run out.

@@ -63,6 +63,9 @@ DEFAULT_MAX_SUPERVISION_ROUNDS = 12
 # per member, so the cost grows with the author count.
 DEFAULT_MAX_COLLABORATION_ROUNDS = 6
 
+# Failed lab-review rounds before a lab waits for human intervention.
+DEFAULT_MAX_LAB_REVIEW_ROUNDS = 8
+
 _CONFIG_PATH = db.REPO_ROOT / "autoprof.toml"
 
 
@@ -74,7 +77,58 @@ def _load(config_path: Path | None = None) -> dict:
         return tomllib.load(f)
 
 
-def max_accepted_papers(config_path: Path | None = None, env: dict | None = None) -> int:
+def _lab_policy_value(
+    name: str,
+    config_key: str,
+    *,
+    lab_id: int | None,
+    config_path: Path | None,
+    env: dict,
+):
+    """Return a lab-scoped policy value, or ``None`` when unset.
+
+    Scoped environment variables use ``<NAME>_<lab_id>``. TOML may use
+    ``[labs.<lab_id>]``. These intentionally precede the process-wide
+    setting so one long-running research program can remove its round
+    ceilings without turning every lab into an unbounded loop.
+
+    For scoped values only, zero means unlimited. Global zero retains each
+    policy's historical clamping behaviour for backward compatibility.
+    """
+    if lab_id is None:
+        return None
+    scoped_name = f"{name}_{lab_id}"
+    if scoped_name in env and str(env[scoped_name]).strip() != "":
+        return env[scoped_name]
+    labs = _load(config_path).get("labs", {})
+    section = labs.get(str(lab_id), {}) if isinstance(labs, dict) else {}
+    if isinstance(section, dict) and config_key in section:
+        return section[config_key]
+    return None
+
+
+def _scoped_nonnegative_int(
+    name: str,
+    config_key: str,
+    *,
+    lab_id: int | None,
+    config_path: Path | None,
+    env: dict,
+) -> int | None:
+    value = _lab_policy_value(
+        name, config_key, lab_id=lab_id, config_path=config_path, env=env
+    )
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def max_accepted_papers(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
     """Target number of accepted papers per lab.
 
     Precedence, most specific first: AUTOPROF_MAX_ACCEPTED_PAPERS env var,
@@ -87,6 +141,12 @@ def max_accepted_papers(config_path: Path | None = None, env: dict | None = None
     the loop.
     """
     env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_ACCEPTED_PAPERS", "max_accepted_papers",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
     raw = env.get("AUTOPROF_MAX_ACCEPTED_PAPERS")
     if raw:
         try:
@@ -104,11 +164,19 @@ def max_accepted_papers(config_path: Path | None = None, env: dict | None = None
     return DEFAULT_MAX_ACCEPTED_PAPERS
 
 
-def max_rejected_papers(config_path: Path | None = None, env: dict | None = None) -> int:
+def max_rejected_papers(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
     """Ceiling on rejected papers for ONE task before it is abandoned.
     Per-task, unlike max_accepted_papers, because it bounds effort sunk
     into a single problem rather than what the lab has to show overall."""
     env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_REJECTED_PAPERS", "max_rejected_papers",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
     raw = env.get("AUTOPROF_MAX_REJECTED_PAPERS")
     if raw:
         try:
@@ -125,9 +193,17 @@ def max_rejected_papers(config_path: Path | None = None, env: dict | None = None
     return DEFAULT_MAX_REJECTED_PAPERS
 
 
-def max_review_exchanges(config_path: Path | None = None, env: dict | None = None) -> int:
+def max_review_exchanges(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
     """Ceiling on reviewer<->author exchanges per reviewer per round."""
     env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_REVIEW_EXCHANGES", "max_review_exchanges",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
     raw = env.get("AUTOPROF_MAX_REVIEW_EXCHANGES")
     if raw:
         try:
@@ -143,11 +219,19 @@ def max_review_exchanges(config_path: Path | None = None, env: dict | None = Non
     return DEFAULT_MAX_REVIEW_EXCHANGES
 
 
-def max_supervision_rounds(config_path: Path | None = None, env: dict | None = None) -> int:
+def max_supervision_rounds(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
     """Ceiling on supervision meetings per task. See
     DEFAULT_MAX_SUPERVISION_ROUNDS for why this is a backstop rather than a
     target."""
     env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_SUPERVISION_ROUNDS", "max_supervision_rounds",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
     raw = env.get("AUTOPROF_MAX_SUPERVISION_ROUNDS")
     if raw:
         try:
@@ -165,10 +249,18 @@ def max_supervision_rounds(config_path: Path | None = None, env: dict | None = N
     return DEFAULT_MAX_SUPERVISION_ROUNDS
 
 
-def max_collaboration_rounds(config_path: Path | None = None, env: dict | None = None) -> int:
+def max_collaboration_rounds(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
     """Ceiling on collaboration rounds. A backstop; hitting it writes the
     joint paper rather than discarding the work."""
     env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_COLLABORATION_ROUNDS", "max_collaboration_rounds",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
     raw = env.get("AUTOPROF_MAX_COLLABORATION_ROUNDS")
     if raw:
         try:
@@ -182,6 +274,36 @@ def max_collaboration_rounds(config_path: Path | None = None, env: dict | None =
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_COLLABORATION_ROUNDS
+
+
+def max_lab_review_rounds(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
+    """Failed root-problem review rounds before human intervention.
+
+    A lab-scoped value of zero removes the ceiling; other labs retain the
+    global/default cap.
+    """
+    env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_LAB_REVIEW_ROUNDS", "max_lab_review_rounds",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
+    raw = env.get("AUTOPROF_MAX_LAB_REVIEW_ROUNDS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_lab_review_rounds")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_LAB_REVIEW_ROUNDS
 
 
 def max_tasks_per_decomposition(config_path: Path | None = None, env: dict | None = None) -> int:

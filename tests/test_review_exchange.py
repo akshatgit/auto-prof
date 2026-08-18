@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -158,6 +159,32 @@ class ReviewerRequestTests(unittest.TestCase):
         self.assertEqual(
             conn.execute("SELECT verdict FROM reviews WHERE reviewer_index=1").fetchone()[0],
             "weak_accept",
+        )
+        conn.close()
+
+    def test_scoped_zero_exchange_cap_allows_more_turns(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        ordinary_cap = config.max_review_exchanges()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(
+            paper_review.config, "max_review_exchanges", lambda **_: 0
+        ):
+            lab_dir = Path(d)
+            pid = _seed_paper(conn, ids, lab_dir)
+            job = paper_review.request_paper_review(conn, pid)[0]
+            for _ in range(ordinary_cap + 1):
+                paper_review.execute_paper_review_job(
+                    conn, job, ScriptedBackend(BackendResult(text=REQUEST)), lab_dir
+                )
+                conn.execute("UPDATE jobs SET status='pending', lease_id=NULL WHERE id=?", (job,))
+                conn.execute(
+                    "UPDATE review_exchanges SET response_path='r' WHERE response_path IS NULL"
+                )
+                conn.commit()
+
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM review_exchanges").fetchone()[0],
+            ordinary_cap + 1,
         )
         conn.close()
 

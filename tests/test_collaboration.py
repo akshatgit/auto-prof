@@ -257,7 +257,9 @@ class CollaborationRoundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
             collab_id = self._form(conn, ids, lab_dir)
-            with mock.patch.object(collaboration.config, "max_collaboration_rounds", lambda: 1):
+            with mock.patch.object(
+                collaboration.config, "max_collaboration_rounds", lambda **_: 1
+            ):
                 self._run_all(conn, lab_dir)
                 synth_id = conn.execute(
                     "SELECT id FROM jobs WHERE kind='collaboration_synthesis'"
@@ -268,6 +270,34 @@ class CollaborationRoundTests(unittest.TestCase):
         self.assertEqual(
             conn.execute("SELECT status FROM collaborations WHERE id=?", (collab_id,)).fetchone()[0],
             "writing",
+        )
+        conn.close()
+
+    def test_zero_round_cap_honours_continue(self):
+        conn = fresh_db()
+        ids = _seed_three_students(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            collab_id = self._form(conn, ids, lab_dir)
+            with mock.patch.object(
+                collaboration.config, "max_collaboration_rounds", lambda **_: 0
+            ):
+                self._run_all(conn, lab_dir)
+                synth_id = conn.execute(
+                    "SELECT id FROM jobs WHERE kind='collaboration_synthesis'"
+                ).fetchone()["id"]
+                collaboration.execute_collaboration_synthesis_job(
+                    conn, synth_id, ScriptedBackend(_synthesis("continue")), lab_dir
+                )
+        self.assertEqual(
+            conn.execute("SELECT status FROM collaborations WHERE id=?", (collab_id,)).fetchone()[0],
+            "working",
+        )
+        self.assertGreater(
+            conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='collaboration_round' AND status='pending'"
+            ).fetchone()[0],
+            0,
         )
         conn.close()
 

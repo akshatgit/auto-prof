@@ -57,6 +57,40 @@ class MaxAcceptedPapersTests(unittest.TestCase):
     def test_shipped_config_declares_four(self):
         self.assertEqual(config.max_accepted_papers(env={}), 4)
 
+    def test_lab_scoped_zero_means_unlimited_without_changing_global_default(self):
+        env = {"AUTOPROF_MAX_ACCEPTED_PAPERS_9": "0"}
+        self.assertEqual(config.max_accepted_papers(env=env, lab_id=9), 0)
+        self.assertEqual(config.max_accepted_papers(env=env, lab_id=8), 4)
+
+    def test_lab_scoped_environment_overrides_global_environment(self):
+        env = {
+            "AUTOPROF_MAX_SUPERVISION_ROUNDS": "3",
+            "AUTOPROF_MAX_SUPERVISION_ROUNDS_9": "0",
+        }
+        self.assertEqual(config.max_supervision_rounds(env=env, lab_id=9), 0)
+        self.assertEqual(config.max_supervision_rounds(env=env, lab_id=8), 3)
+
+    def test_lab_scoped_toml_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _toml(
+                tmp,
+                "[lab]\nmax_review_exchanges = 2\n"
+                "[labs.9]\nmax_review_exchanges = 0\n",
+            )
+            self.assertEqual(config.max_review_exchanges(path, env={}, lab_id=9), 0)
+            self.assertEqual(config.max_review_exchanges(path, env={}, lab_id=8), 2)
+
+    def test_scoped_zero_is_supported_for_every_research_loop(self):
+        names_and_getters = [
+            ("AUTOPROF_MAX_REJECTED_PAPERS_9", config.max_rejected_papers),
+            ("AUTOPROF_MAX_REVIEW_EXCHANGES_9", config.max_review_exchanges),
+            ("AUTOPROF_MAX_COLLABORATION_ROUNDS_9", config.max_collaboration_rounds),
+            ("AUTOPROF_MAX_LAB_REVIEW_ROUNDS_9", config.max_lab_review_rounds),
+        ]
+        for name, getter in names_and_getters:
+            with self.subTest(name=name):
+                self.assertEqual(getter(env={name: "0"}, lab_id=9), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

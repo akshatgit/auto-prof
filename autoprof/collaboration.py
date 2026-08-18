@@ -456,8 +456,8 @@ def execute_collaboration_synthesis_job(
         f"{merged}\n\n## Guidance for next round\n\n{guidance or '(none)'}\n",
     )
 
-    max_rounds = config.max_collaboration_rounds()
-    if verdict == "continue" and round_ >= max_rounds:
+    max_rounds = config.max_collaboration_rounds(lab_id=collab["lab_id"])
+    if verdict == "continue" and max_rounds and round_ >= max_rounds:
         # Terminate a non-converging collaboration by writing up what
         # exists rather than discarding it -- same reasoning as the
         # supervision round cap.
