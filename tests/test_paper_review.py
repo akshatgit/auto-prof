@@ -90,6 +90,24 @@ class BuildReviewPromptTests(unittest.TestCase):
         self.assertIn("cannot be repaired by revision", prompt)
         self.assertIn("you may not return `strong_reject`", prompt)
 
+    def test_tells_the_reviewer_what_its_verdict_actually_does(self):
+        # Only `strong_accept` admits a document, but the sole mention of
+        # that gate lived in the authoring comment, which is stripped --
+        # so reviewers graded on a six-point scale without knowing five
+        # of the tiers were the same outcome. Codex and Claude returned 1
+        # strong_accept in 292 reviews but 15 accept-tier verdicts, and a
+        # paper that went accept/accept/accept was recorded as rejected.
+        prompt = paper_review.build_review_prompt("<h1>Doc</h1>")
+        self.assertIn("Only `strong_accept` admits", prompt)
+        self.assertIn("including `accept`", prompt)
+
+    def test_does_not_leak_panel_size_or_the_tally_rule(self):
+        # Reviewer independence is the load-bearing property: a reviewer
+        # who knows the threshold can vote strategically toward it.
+        prompt = paper_review.build_review_prompt("<h1>Doc</h1>")
+        self.assertNotIn("2-of-3", prompt)
+        self.assertNotIn("4-of-5", prompt)
+
 
 class RequestPaperReviewTests(unittest.TestCase):
     def test_enqueues_three_jobs_for_the_current_round(self):
@@ -445,20 +463,24 @@ class RevisionEnqueueTests(unittest.TestCase):
         )
         conn.close()
 
-    def test_revision_continues_below_the_target_regardless_of_round(self):
+    def test_revision_limit_returns_the_task_to_research(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
             lab_dir = Path(d)
             paper_id = _seed_paper(conn, ids, lab_dir)
-            # Round 9 -- far past any old round cap; with zero accepted
-            # papers the lab must still keep trying.
+            # The task keeps trying, but it must produce evidence and a new
+            # paper instead of indefinitely expanding the same document.
             conn.execute("UPDATE papers SET review_round=9 WHERE id=?", (paper_id,))
             conn.commit()
             self._reject(conn, ids, lab_dir, paper_id=paper_id)
 
         self.assertEqual(
             conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_revise_paper'").fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_work'").fetchone()[0],
             1,
         )
         conn.close()

@@ -263,6 +263,25 @@ between a document with a fatal flaw and one that is merely imperfect.
 - `strong_accept` — you attacked it, it held, and you would stake your
   reputation on it.
 
+## What your verdict does
+
+Only `strong_accept` admits a document to the record. Every other verdict
+on the scale — including `accept` — leaves it out and sends it back for
+revision. There is no tier that means "good enough to publish but short of
+my personal endorsement": in this system that sentiment is a rejection.
+
+This is not an instruction to soften. Rejection remains the default and
+the mandate to attack above is unchanged. It is an instruction to make
+your verdict say what you actually mean: if you attacked the document, it
+held, and you believe it belongs in the record, `strong_accept` is the
+verdict that expresses that, and `accept` is not. Withhold it whenever you
+genuinely have not been convinced — but do not withhold it merely because
+the label sounds superlative, or to leave yourself room above your real
+judgement.
+
+Say nothing about, and do not try to infer, how many other reviewers there
+are or how their verdicts combine with yours. Judge the document alone.
+
 Two sanity checks before you commit to a verdict. If your review names no
 specific unrecoverable defect, you may not return `strong_reject`. If
 your objections are all things the author could fix in a revision, the
