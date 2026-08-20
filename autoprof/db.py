@@ -35,6 +35,9 @@ def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 # does not belong here.
 _ADDITIVE_MIGRATIONS = (
     ("jobs", "backend_session_id", "TEXT"),
+    # JSON detail about an event. Added for escalation records, which
+    # carry the failure class that stopped the job.
+    ("events", "metadata", "TEXT"),
     # Stable operation identity (§4). Cannot carry the UNIQUE constraint
     # here -- SQLite's ADD COLUMN rejects UNIQUE -- so existing rows are
     # backfilled below and the uniqueness is enforced by a separate index.

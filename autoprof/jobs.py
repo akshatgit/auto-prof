@@ -102,6 +102,25 @@ def fail_job(conn: sqlite3.Connection, job_id: int, lease_id: str, error_message
         target_type=row["target_type"],
         target_id=row["target_id"],
     )
+    # RecoveryPolicy.escalate meant "surface to a human rather than fail
+    # silently", but nothing ever read it, so an escalating class died as
+    # quietly as a routine one. A provider refusal is the case that made
+    # this matter: lab #9's supervision was refused on content grounds,
+    # went terminal, and the lab simply stopped with no pending job and no
+    # signal anywhere. The distinct event is what `autoprof status
+    # --blocked` reads, so a stuck lab is discoverable without grepping
+    # last_error across the jobs table.
+    if recovery.lookup(classification).escalate:
+        record_job_event(
+            conn,
+            job_id=job_id,
+            actor_type="daemon",
+            actor_id=None,
+            event_type="job_escalated",
+            target_type=row["target_type"],
+            target_id=row["target_id"],
+            metadata={"classification": classification, "kind": row["kind"]},
+        )
     conn.commit()
 
     # §18: record what went wrong and what to do differently, so the same

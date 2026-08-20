@@ -38,9 +38,22 @@ MODEL_CAPACITY = "model_capacity"  # rate limit, token/context exhaustion
 TASK_LOGIC = "task_logic"         # the work itself is wrong or impossible
 STATE_CONFLICT = "state_conflict"  # stale round, vanished row, lease lost
 CONFIG = "config"                 # missing binary, bad credentials, bad path
+MODEL_DENIED = "model_denied"     # provider refused the prompt on policy grounds
 UNKNOWN = "unknown"
 
 _PATTERNS = (
+    # Checked first: a provider refusal is not a capacity, config or
+    # output problem, and misreading it as UNKNOWN spends two identical
+    # retries earning two identical refusals. Lab #9 studies container
+    # build-cache soundness, so its supervision prompts ask a model to
+    # plan builds that make a cache serve wrong content -- which OpenAI's
+    # filter reads as offensive security work and blocks. The research is
+    # legitimate and the prompt is not going to change on a retry, so this
+    # must be recognised, stopped and surfaced rather than retried.
+    (MODEL_DENIED, r"flagged for possible cybersecurity|trusted access for cyber"
+                   r"|content policy|usage polic(y|ies)|safety (policy|system|filter)"
+                   r"|refused to (respond|answer|comply)|blocked by [a-z ]*(policy|filter)"
+                   r"|cannot assist with that request|violates .{0,20}polic"),
     (MODEL_CAPACITY, r"rate.?limit|usage limit|429|context (length|window)|token limit|out of tokens|quota"),
     (CONFIG, r"not found on path|no such file|permission denied|unauthor|invalid.{0,12}(key|credential)|not configured"),
     (MODEL_OUTPUT, r"no verdict line|unusable|not an html document|produced no output|empty .*output|expected json|unparse|missing required keys|verdict .* not one of"),
@@ -52,7 +65,16 @@ _PATTERNS = (
     (WORKER, r"timed out|timeout|killed|broken pipe|connection reset"
              r"|http 5\d\d|internal server error|service unavailable|bad gateway"
              r"|gateway time-?out|temporarily unavailable|overloaded"),
-    (STATE_CONFLICT, r"no longer exists|is now on round|has no assigned student|missing:|no (task|paper|lab|professor) with id"),
+    # An operator or the system itself cancelled this job: the lab was
+    # retired, the root problem was replaced, the task abandoned, or a
+    # restart superseded an in-flight run. The state moved on exactly as
+    # STATE_CONFLICT describes, and nobody needs paging about it. Left
+    # unclassified these fell into UNKNOWN, whose escalate flag made 39
+    # deliberate cancellations drown the one refusal that did need a human.
+    (STATE_CONFLICT, r"no longer exists|is now on round|has no assigned student|missing:"
+                     r"|no (task|paper|lab|professor) with id"
+                     r"|^superseded|superseded (by|:)|retired:|abandoned:"
+                     r"|replaced before review|before review completed"),
     (TASK_LOGIC, r"has no reviews to revise|cannot be completed"),
 )
 
@@ -122,6 +144,15 @@ POLICIES = {
     CONFIG: RecoveryPolicy(CONFIG, retry=False, max_attempts=1, escalate=True,
                            preventive_rule="Fix the environment (binary on PATH, credentials, "
                                            "paths) before re-running; no retry can."),
+    # A refusal is deterministic in the prompt: the identical text earns
+    # the identical refusal, so retrying is pure waste. It is also the one
+    # failure class a human must see, because the fix is external to the
+    # run -- route that job kind to a different provider, or reword the
+    # prompt so legitimate research is not read as an attack request.
+    MODEL_DENIED: RecoveryPolicy(MODEL_DENIED, retry=False, max_attempts=1, escalate=True,
+                                 preventive_rule="Route this job kind to a different provider "
+                                                 "for this lab, or reframe the prompt; the same "
+                                                 "prompt will be refused again."),
     # Unclassified: retry, but briefly, and escalate. Re-running a job is
     # a reversible internal action -- cheap, no external effect -- so the
     # design's "aggressive for reversible failures, conservative for
@@ -220,3 +251,13 @@ def recurring_failures(conn: sqlite3.Connection, classification: str, limit: int
         "ORDER BY created_at DESC LIMIT ?",
         (classification, limit),
     ).fetchall()
+
+
+def is_denial(error: str | None) -> bool:
+    """True when a provider refused the prompt rather than failing on it.
+
+    Distinct from every other failure because nothing about the run was
+    wrong: the job is well-formed, the backend is healthy, and the work is
+    simply not going to happen through this provider.
+    """
+    return classify_failure(error) == MODEL_DENIED

@@ -1,6 +1,7 @@
+import json
 import unittest
 
-from autoprof import jobs
+from autoprof import jobs, recovery
 from autoprof.backends.base import BackendResult
 from tests.helpers import fresh_db, seed_lab_with_student
 
@@ -411,6 +412,47 @@ class ProviderCircuitBreakerTests(unittest.TestCase):
         self.assertEqual(row["attempts"], 0)
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["wait_reason"], "rate_limited")
+        conn.close()
+
+
+class EscalationEventTests(unittest.TestCase):
+    """RecoveryPolicy.escalate said "surface to a human rather than fail
+    silently" and nothing read it, so an escalating class died as quietly
+    as a routine one."""
+
+    CYBER = ("This content was flagged for possible cybersecurity risk. To get "
+             "authorized for security work, join the Trusted Access for Cyber program")
+
+    def _claimed_job(self, conn, ids):
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('professor_supervision', 'task', ?, 'pending')", (ids["task_id"],))
+        job_id = cur.lastrowid
+        conn.commit()
+        jobs.claim_job(conn, job_id, "lease-esc", lease_seconds=600)
+        return job_id
+
+    def test_a_refusal_records_an_escalation_carrying_its_class(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = self._claimed_job(conn, ids)
+        self.assertEqual(jobs.fail_job(conn, job_id, "lease-esc", self.CYBER), "failed")
+        row = conn.execute(
+            "SELECT metadata FROM events WHERE job_id=? AND event_type='job_escalated'",
+            (job_id,)).fetchone()
+        self.assertIsNotNone(row, "a refusal must leave a signal a human can find")
+        self.assertEqual(json.loads(row["metadata"])["classification"], recovery.MODEL_DENIED)
+        conn.close()
+
+    def test_a_routine_failure_does_not_escalate(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = self._claimed_job(conn, ids)
+        jobs.fail_job(conn, job_id, "lease-esc", "superseded: state moved on")
+        row = conn.execute(
+            "SELECT 1 FROM events WHERE job_id=? AND event_type='job_escalated'",
+            (job_id,)).fetchone()
+        self.assertIsNone(row)
         conn.close()
 
 

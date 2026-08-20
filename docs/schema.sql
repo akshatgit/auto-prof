@@ -808,6 +808,11 @@ CREATE TABLE events (
     target_type     TEXT NOT NULL,
     target_id       INTEGER NOT NULL,
     payload_path    TEXT,           -- optional pointer to a file with the full output
+    -- Small structured detail ABOUT the event, as JSON. An escalation
+    -- records the failure classification that caused it, so a stuck lab
+    -- can be diagnosed from the audit log rather than by grepping
+    -- jobs.last_error.
+    metadata        TEXT,
     occurred_at     TEXT NOT NULL DEFAULT (datetime('now')),
     CHECK (job_id IS NOT NULL OR actor_type = 'human')
 );

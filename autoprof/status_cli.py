@@ -7,9 +7,10 @@ verdicts, plus the job queue, in one read-only pass.
 """
 
 import argparse
+import json
 from pathlib import Path
 
-from . import db
+from . import db, recovery
 
 _VERDICT_MARK = {
     "strong_accept": "++",
@@ -123,10 +124,55 @@ def render_status(conn) -> str:
     return "\n".join(out)
 
 
+def render_blocked(conn) -> str:
+    """Jobs that stopped for a reason no retry can clear.
+
+    A provider refusal is the motivating case: nothing about the run was
+    wrong, so it leaves no failing test and no error a human would think
+    to look for -- the lab simply stops having pending work. Lab #9's
+    supervision was refused on cybersecurity-content grounds, went
+    terminal, and the whole lab sat idle with no signal anywhere.
+
+    Classified from jobs.last_error rather than read from the escalation
+    events, so it reports failures that predate the event and cannot go
+    blind if one was never written.
+    """
+    rows = conn.execute(
+        "SELECT id, kind, target_type, target_id, last_error, completed_at "
+        "FROM jobs WHERE status = 'failed' ORDER BY id DESC"
+    ).fetchall()
+    blocked = [
+        (row, recovery.classify_failure(row["last_error"]))
+        for row in rows
+        if recovery.lookup(recovery.classify_failure(row["last_error"])).escalate
+    ]
+    if not blocked:
+        return "No blocked jobs: nothing has failed in a class that needs a human."
+
+    denied = sum(1 for _, c in blocked if c == recovery.MODEL_DENIED)
+    head = f"{len(blocked)} blocked job(s) -- these will not retry on their own"
+    if denied:
+        head += f"; {denied} refused by the provider on content grounds"
+    out = [head + ":", ""]
+    for row, classification in blocked:
+        out.append(
+            f"  job {row['id']} [{row['kind']}] on {row['target_type']} "
+            f"{row['target_id']} -- {classification}  ({row['completed_at']})"
+        )
+        rule = recovery.lookup(classification).preventive_rule
+        if rule:
+            out.append(f"    -> {rule}")
+        lines = [ln for ln in (row["last_error"] or "").strip().splitlines() if ln.strip()]
+        if lines:
+            out.append(f"    {lines[-1][:160]}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
 def _cmd_status(args) -> int:
     conn = db.connect(args.db_path)
     db.ensure_initialized(conn)
-    print(render_status(conn))
+    print(render_blocked(conn) if args.blocked else render_status(conn))
     conn.close()
     return 0
 
@@ -136,4 +182,9 @@ def add_subparser(subparsers) -> None:
         "status", help="Show the full lab tree: labs, tasks, students, papers, reviews, jobs."
     )
     p.add_argument("--db-path", type=Path, default=db.DEFAULT_DB_PATH)
+    p.add_argument(
+        "--blocked", action="store_true",
+        help="Instead show only jobs that stopped in a class no retry can clear "
+             "(provider content refusals, bad config, impossible tasks).",
+    )
     p.set_defaults(func=_cmd_status)

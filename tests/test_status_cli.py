@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from autoprof.status_cli import render_status  # noqa: E402
+from autoprof.status_cli import render_blocked, render_status  # noqa: E402
 from tests.helpers import fresh_db, seed_lab_with_student  # noqa: E402
 
 
@@ -93,6 +93,47 @@ class RenderStatusTests(unittest.TestCase):
         out = render_status(conn)
         self.assertIn("reviews[r1]", out)
         self.assertIn("0 strong_accept", out)
+        conn.close()
+
+
+class RenderBlockedTests(unittest.TestCase):
+    """`status --blocked` exists because a provider refusal leaves no
+    failing test and no pending job -- the lab just silently stops."""
+
+    CYBER = ("This content was flagged for possible cybersecurity risk. To get "
+             "authorized for security work, join the Trusted Access for Cyber program")
+
+    def _failed_job(self, conn, ids, kind, error):
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status, last_error) "
+            "VALUES (?, 'task', ?, 'failed', ?)", (kind, ids["task_id"], error))
+        conn.commit()
+        return cur.lastrowid
+
+    def test_quiet_when_nothing_is_blocked(self):
+        conn = fresh_db()
+        self.assertIn("No blocked jobs", render_blocked(conn))
+        conn.close()
+
+    def test_reports_a_refused_job_with_the_remedy(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = self._failed_job(conn, ids, "professor_supervision", self.CYBER)
+        out = render_blocked(conn)
+        self.assertIn(f"job {job_id}", out)
+        self.assertIn("model_denied", out)
+        self.assertIn("refused by the provider on content grounds", out)
+        # The remedy must be actionable, not just a label.
+        self.assertIn("different provider", out)
+        conn.close()
+
+    def test_deliberate_cancellations_are_not_reported(self):
+        # 39 operator supersessions once buried the single real refusal.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        self._failed_job(conn, ids, "student_work", "superseded: restart with fresh session")
+        self._failed_job(conn, ids, "student_work", "lab 6 retired: ran with broken tooling")
+        self.assertIn("No blocked jobs", render_blocked(conn))
         conn.close()
 
 

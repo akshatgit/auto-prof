@@ -232,5 +232,52 @@ class ArtifactCheckpointTests(unittest.TestCase):
             self.assertLessEqual(len(kept), 5)
 
 
+class DenialClassificationTests(unittest.TestCase):
+    """A provider refusing the prompt is its own failure class."""
+
+    CYBER = ("This content was flagged for possible cybersecurity risk. If this seems "
+             "wrong, try rephrasing your request. To get authorized for security work, "
+             "join the Trusted Access for Cyber program: https://chatgpt.com/cyber")
+
+    def test_cyber_refusal_is_model_denied(self):
+        # Lab #9 studies container build-cache soundness, so its prompts ask
+        # a model to plan builds that make a cache serve wrong content. That
+        # is legitimate correctness research, and the filter reads it as an
+        # attack request.
+        self.assertEqual(recovery.classify_failure(self.CYBER), recovery.MODEL_DENIED)
+        self.assertTrue(recovery.is_denial(self.CYBER))
+
+    def test_a_denial_is_never_retried(self):
+        # The identical prompt earns the identical refusal; retrying spends
+        # attempts to learn nothing.
+        self.assertFalse(recovery.should_retry(recovery.MODEL_DENIED, attempts=1))
+
+    def test_a_denial_escalates(self):
+        # The fix is external to the run -- reroute the job kind or reword
+        # the prompt -- so a human has to see it.
+        self.assertTrue(recovery.lookup(recovery.MODEL_DENIED).escalate)
+
+    def test_ordinary_failures_are_not_read_as_denials(self):
+        for benign in ("rate limit exceeded", "codex CLI not found on PATH",
+                       "no VERDICT line found in review output", "timed out after 900s"):
+            self.assertFalse(recovery.is_denial(benign), benign)
+
+
+class OperatorCancellationTests(unittest.TestCase):
+    def test_supersession_is_a_state_conflict_and_does_not_page_anyone(self):
+        # These are deliberate cancellations. Unclassified they fell into
+        # UNKNOWN, whose escalate flag buried the one real refusal under 39
+        # of them in `status --blocked`.
+        for cancelled in (
+            "superseded: restart with explicit authorized defensive scope",
+            "superseded by human research-goal update before review completed",
+            "lab 7 tasks abandoned: end criteria assumed a population this installation lacks",
+            "lab 6 retired: ran with broken tooling",
+        ):
+            self.assertEqual(recovery.classify_failure(cancelled),
+                             recovery.STATE_CONFLICT, cancelled)
+            self.assertFalse(recovery.lookup(recovery.classify_failure(cancelled)).escalate)
+
+
 if __name__ == "__main__":
     unittest.main()
