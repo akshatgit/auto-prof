@@ -70,7 +70,8 @@ def _cmd_edit(args) -> int:
     db.ensure_initialized(conn)
     try:
         student_ctl.edit_student(
-            conn, args.student_id, status=args.status, memory_text=memory_text, lab_dir=db.LAB_DIR
+            conn, args.student_id, status=args.status, memory_text=memory_text,
+            lab_dir=args.lab_dir,
         )
     except student_ctl.StudentControlError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -124,6 +125,12 @@ def add_subparser(subparsers) -> None:
     sp.add_argument("student_id", type=int)
     sp.add_argument("--status", default=None, help=f"One of {sorted(student_ctl.VALID_STUDENT_STATUSES)}")
     sp.add_argument("--memory-file", default=None, help="Path to a file whose contents replace memory.md")
+    # Every other CLI that resolves a lab path takes this; edit hardcoded
+    # db.LAB_DIR while still accepting --db-path, so on any installation whose
+    # lab tree is not beside the source (this one keeps it on a NAS) it wrote
+    # the student's memory into the source checkout and reported success. The
+    # daemon then went on reading the real file, which had never changed.
+    sp.add_argument("--lab-dir", type=Path, default=db.LAB_DIR)
     sp.set_defaults(func=_cmd_edit)
 
     sp = sub.add_parser(

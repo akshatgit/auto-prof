@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autoprof import db
 from autoprof.student_ctl import (
     StudentControlError,
     StudentNotFoundError,
@@ -224,6 +225,53 @@ class ReplayJobTests(unittest.TestCase):
         self.assertEqual(row["target_id"], original_id)
         self.assertEqual(row["job_id"], new_id)
         conn.close()
+
+
+class EditCliLabDirTests(unittest.TestCase):
+    """`student edit` accepted --db-path but hardcoded the lab directory."""
+
+    def test_memory_is_written_under_the_lab_dir_that_was_asked_for(self):
+        # The installation that found this keeps its lab tree on a NAS while
+        # the source lives elsewhere, so the edit wrote memory into the
+        # source checkout, printed success, and the daemon kept reading the
+        # real file -- which had never changed.
+        from autoprof import cli
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            conn = fresh_db()
+            ids = seed_lab_with_student(conn)
+            rel = f"{ids['lab_id']}/students/{ids['student_id']}/memory.md"
+            conn.execute("UPDATE students SET memory_path=? WHERE id=?",
+                         (rel, ids["student_id"]))
+            conn.commit()
+            db_path = root / "auto.db"
+            conn.close()
+
+            # Persist the seeded DB where the CLI can open it.
+            import shutil, sqlite3
+            src = fresh_db()
+            ids = seed_lab_with_student(src)
+            rel = f"{ids['lab_id']}/students/{ids['student_id']}/memory.md"
+            src.execute("UPDATE students SET memory_path=? WHERE id=?", (rel, ids["student_id"]))
+            src.commit()
+            disk = sqlite3.connect(db_path)
+            src.backup(disk)
+            disk.close(); src.close()
+
+            lab_dir = root / "nas-lab"
+            memo = root / "new_memory.md"
+            memo.write_text("OPERATOR NOTE")
+
+            rc = cli.main([
+                "student", "edit", str(ids["student_id"]),
+                "--db-path", str(db_path),
+                "--lab-dir", str(lab_dir),
+                "--memory-file", str(memo),
+            ])
+            self.assertEqual(rc, 0)
+            self.assertEqual((lab_dir / rel).read_text(), "OPERATOR NOTE")
+            # And nothing was written to the default location.
+            self.assertFalse((db.LAB_DIR / rel).exists())
 
 
 if __name__ == "__main__":
