@@ -26,10 +26,18 @@ class ScriptedBackend(Backend):
         return self.result
 
 
-def _payload(verdict="continue", guidance="fix lemma 2 step 3"):
+def _payload(verdict="continue", guidance="fix lemma 2 step 3", *, complete=None):
+    complete = verdict == "ready" if complete is None else complete
     return BackendResult(
         text=json.dumps(
-            {"verdict": verdict, "assessment": "partial result only", "guidance": guidance}
+            {
+                "verdict": verdict,
+                "assessment": "complete result" if complete else "partial result only",
+                "guidance": guidance,
+                "end_criteria_met": complete,
+                "completion_evidence": ["artifact and result verified"] if complete else [],
+                "remaining_gaps": [] if complete else ["work remains"],
+            }
         )
     )
 
@@ -87,6 +95,18 @@ class SupervisionVerdictTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_ready_without_completion_evidence_returns_to_research(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            self._run(conn, ids, Path(d), _payload("ready", complete=False))
+
+        row = conn.execute("SELECT verdict FROM supervisions").fetchone()
+        self.assertEqual(row["verdict"], "continue")
+        kinds = [r["kind"] for r in conn.execute("SELECT kind FROM jobs WHERE status='pending'")]
+        self.assertEqual(kinds, ["student_work"])
+        conn.close()
+
     def test_abandon_closes_the_task_and_queues_nothing(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
@@ -130,7 +150,7 @@ class SupervisionVerdictTests(unittest.TestCase):
         self.assertEqual(rounds, [1, 2, 3])
         conn.close()
 
-    def test_round_cap_forces_a_write_up_rather_than_discarding_work(self):
+    def test_round_cap_abandons_instead_of_forcing_incomplete_write_up(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         with tempfile.TemporaryDirectory() as d:
@@ -142,9 +162,9 @@ class SupervisionVerdictTests(unittest.TestCase):
                 self._run(conn, ids, lab_dir, _payload("continue"))
 
         last = conn.execute("SELECT * FROM supervisions ORDER BY round DESC LIMIT 1").fetchone()
-        self.assertEqual(last["verdict"], "ready")
+        self.assertEqual(last["verdict"], "abandon")
         kinds = {r["kind"] for r in conn.execute("SELECT kind FROM jobs WHERE status='pending'")}
-        self.assertIn("student_write_paper", kinds)
+        self.assertNotIn("student_write_paper", kinds)
         conn.close()
 
     def test_the_cap_resets_once_a_paper_has_been_written(self):
@@ -163,7 +183,7 @@ class SupervisionVerdictTests(unittest.TestCase):
                 supervision.config, "max_supervision_rounds", lambda **_: 2
             ):
                 self._run(conn, ids, lab_dir, _payload("continue"))
-                self._run(conn, ids, lab_dir, _payload("continue"))  # forced 'ready'
+                self._run(conn, ids, lab_dir, _payload("continue"))  # abandoned at cap
 
                 conn.execute(
                     "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
@@ -171,7 +191,12 @@ class SupervisionVerdictTests(unittest.TestCase):
                     (ids["task_id"], ids["student_id"]),
                 )
                 conn.execute(
-                    "UPDATE students SET status='working' WHERE id=?", (ids["student_id"],)
+                    "UPDATE students SET task_id=?, status='working' WHERE id=?",
+                    (ids["task_id"], ids["student_id"]),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='in_progress', assigned_student_id=? WHERE id=?",
+                    (ids["student_id"], ids["task_id"]),
                 )
                 conn.commit()
 
@@ -197,7 +222,7 @@ class SupervisionVerdictTests(unittest.TestCase):
         verdicts = [r["verdict"] for r in conn.execute(
             "SELECT verdict FROM supervisions ORDER BY round"
         )]
-        self.assertEqual(verdicts, ["continue", "continue", "ready"])
+        self.assertEqual(verdicts, ["continue", "continue", "abandon"])
         conn.close()
 
     def test_zero_scoped_cap_never_forces_ready(self):
@@ -234,6 +259,8 @@ class SupervisionContextTests(unittest.TestCase):
 
             self.assertIn("first instruction", backend.calls[0])
             self.assertIn("meeting number 2", backend.calls[0])
+            self.assertIn("defensive software-quality research", backend.calls[0])
+            self.assertIn("isolated local containers", backend.calls[0])
         conn.close()
 
     def test_student_guidance_foregrounds_the_latest(self):
@@ -260,6 +287,81 @@ class SupervisionContextTests(unittest.TestCase):
             self.assertIn(
                 "not met", supervision.render_student_guidance(conn, ids["task_id"], Path(d))
             )
+        conn.close()
+
+    def test_long_history_keeps_only_recent_meetings_in_full(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            with mock.patch.object(supervision.config, "max_supervision_rounds", lambda **_: 0):
+                for i in range(6):
+                    job = _enqueue(conn, ids["task_id"])
+                    supervision.execute_professor_supervision_job(
+                        conn,
+                        job,
+                        ScriptedBackend(_payload("continue", f"instruction-{i}")),
+                        lab_dir,
+                    )
+
+            rendered = supervision.render_student_guidance(conn, ids["task_id"], lab_dir)
+            self.assertIn("older meetings compacted", rendered)
+            self.assertNotIn("instruction-0", rendered)
+            self.assertNotIn("instruction-1", rendered)
+            self.assertIn("instruction-5", rendered)
+        conn.close()
+
+
+class HistoryScopingTests(unittest.TestCase):
+    """A replacement student must not inherit their predecessor's record."""
+
+    def _meeting(self, conn, task_id, student_id, round_, verdict, lab_dir):
+        rel = f"1/tasks/{task_id}/supervision/{round_}.md"
+        (lab_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (lab_dir / rel).write_text(f"guidance for round {round_}")
+        conn.execute(
+            "INSERT INTO supervisions (task_id, student_id, round, verdict, guidance_path) "
+            "VALUES (?, ?, ?, ?, ?)", (task_id, student_id, round_, verdict, rel))
+        conn.commit()
+
+    def test_a_new_student_is_not_shown_the_previous_students_meetings_as_their_own(self):
+        # `round` is UNIQUE per task so it never resets. A replacement
+        # student's first meeting was numbered 54 and carried 53 rounds of
+        # their predecessor's history, including the abandon that freed the
+        # task; the professor read its own exhausted patience and abandoned
+        # again on the new student's very first round.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            old = ids["student_id"]
+            self._meeting(conn, ids["task_id"], old, 1, "continue", lab_dir)
+            self._meeting(conn, ids["task_id"], old, 2, "abandon", lab_dir)
+            # students.task_id is UNIQUE: abandon frees the old student first.
+            conn.execute("UPDATE students SET task_id=NULL, status='unassigned' WHERE id=?", (old,))
+            new = conn.execute(
+                "INSERT INTO students (task_id, professor_id, status, memory_path) "
+                "VALUES (?, ?, 'working', 'x')",
+                (ids["task_id"], ids["professor_id"]),
+            ).lastrowid
+            conn.commit()
+
+            out = supervision.render_history(conn, ids["task_id"], lab_dir, new)
+            self.assertIn("first meeting with this student", out)
+            self.assertIn("previous student", out)
+            self.assertIn("do not", out.lower())
+            # The predecessor's guidance body must not read as this student's.
+            self.assertNotIn("guidance for round 1", out)
+        conn.close()
+
+    def test_a_students_own_meetings_are_still_shown_in_full(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            self._meeting(conn, ids["task_id"], ids["student_id"], 1, "continue", lab_dir)
+            out = supervision.render_history(conn, ids["task_id"], lab_dir, ids["student_id"])
+            self.assertIn("guidance for round 1", out)
         conn.close()
 
 

@@ -32,9 +32,15 @@ from .events import record_job_event
 from .jsonio import extract_json_object
 
 VALID_VERDICTS = ("continue", "ready", "abandon")
+MAX_FULL_CONTEXT_MEETINGS = 4
 
 SUPERVISION_PROMPT_TEMPLATE = """You are {name}, a professor in {field}, supervising a PhD \
 student on one task in your lab.
+
+Safety and authorization scope: this is defensive software-quality research performed only on
+the lab's own isolated local containers and checked-in test fixtures. Do not access third-party
+systems, credentials, production services, or unrelated networks. The purpose is to verify build
+correctness and regression boundaries, not to exploit, persist in, or disrupt any system.
 
 Your lab's root problem:
 <root_problem>
@@ -89,9 +95,17 @@ encouragement is useless and wastes a round.
 independent review. Do not say this merely because progress has been made.
 - "abandon": this line of attack is not going to work, and the honest move is to stop. Say why.
 
+A `ready` decision is machine-gated. Set `end_criteria_met` true only when the task's stated
+success criteria OR its explicitly stated negative-close criteria are all satisfied by artifacts
+that exist now. List those artifacts/results in `completion_evidence`, and list every remaining
+gap in `remaining_gaps`. If any required criterion remains unmet, the verdict must be `continue`
+or `abandon`; changing venue or calling an incomplete result a workshop paper does not satisfy
+the gate.
+
 Respond with ONLY a JSON object, no markdown fences, no commentary before or after, in exactly \
 this shape:
-{{"verdict": "continue|ready|abandon", "assessment": "...", "guidance": "..."}}
+{{"verdict": "continue|ready|abandon", "assessment": "...", "guidance": "...", \
+"end_criteria_met": true|false, "completion_evidence": ["..."], "remaining_gaps": ["..."]}}
 where "assessment" is your honest read of where the work stands, and "guidance" is what the \
 student should do next (for "ready", what they must be careful to include when writing up; for \
 "abandon", why stopping is right).
@@ -102,7 +116,9 @@ class SupervisionError(RuntimeError):
     pass
 
 
-def render_history(conn: sqlite3.Connection, task_id: int, lab_dir: Path) -> str:
+def render_history(
+    conn: sqlite3.Connection, task_id: int, lab_dir: Path, student_id: int | None = None
+) -> str:
     """Prior meetings, oldest first, so the professor can see whether their
     own guidance was actually followed.
 
@@ -110,19 +126,54 @@ def render_history(conn: sqlite3.Connection, task_id: int, lab_dir: Path) -> str
     ask for the same fix indefinitely -- the exact failure the loop exists
     to avoid.
     """
-    rows = conn.execute(
+    all_rows = conn.execute(
         "SELECT * FROM supervisions WHERE task_id = ? ORDER BY round", (task_id,)
     ).fetchall()
-    if not rows:
-        return "This is the first meeting; there is no prior guidance."
 
+    # Meetings held with a DIFFERENT student are somebody else's record, not
+    # guidance this student failed to follow. A reopened task keeps counting
+    # rounds (`round` is UNIQUE per task and names the artifact file), so a
+    # replacement student's first meeting was numbered 54 and arrived with 53
+    # rounds of their predecessor's history -- including the abandon that
+    # freed the task. The professor read that as its own exhausted patience
+    # and abandoned again on the new student's first round. Scope the
+    # relationship to this student and summarise the rest as inherited
+    # context.
+    prior = [r for r in all_rows if student_id is not None and r["student_id"] != student_id]
+    rows = [r for r in all_rows if student_id is None or r["student_id"] == student_id]
+
+    preamble = ""
+    if prior:
+        outcomes = ", ".join(f"{r['round']}:{r['verdict']}" for r in prior[-12:])
+        preamble = (
+            f"A previous student worked this task for {len(prior)} meetings before being "
+            f"replaced; their memory was handed over to the current student. Recent outcomes: "
+            f"{outcomes}. That record is context, NOT guidance this student ignored -- do not "
+            "hold it against them, and judge this student on their own meetings below.\n\n"
+        )
+
+    if not rows:
+        return preamble + (
+            "This is your first meeting with this student; there is no prior guidance to them."
+        )
+
+    omitted = rows[:-MAX_FULL_CONTEXT_MEETINGS]
+    included = rows[-MAX_FULL_CONTEXT_MEETINGS:]
     parts = []
-    for row in rows:
+    if omitted:
+        outcomes = ", ".join(f"{row['round']}:{row['verdict']}" for row in omitted)
+        parts.append(
+            f"{len(omitted)} older meetings were compacted to prevent context growth. "
+            f"Outcome index: {outcomes}. The student's current memory is authoritative for "
+            "work carried forward from them."
+        )
+    for row in included:
         path = lab_dir / row["guidance_path"]
         body = path.read_text() if path.exists() else "(guidance file missing)"
         parts.append(f"--- Meeting {row['round']} (you said: {row['verdict']}) ---\n{body}")
     return (
-        "Your own guidance from previous meetings on this task, oldest first. "
+        preamble
+        + "Your own guidance from previous meetings with THIS student, oldest first. "
         "Check whether the student actually acted on it:\n<supervision_history>\n"
         + "\n\n".join(parts)
         + "\n</supervision_history>"
@@ -212,7 +263,7 @@ def execute_professor_supervision_job(
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             round=round_,
-            history=render_history(conn, task["id"], lab_dir),
+            history=render_history(conn, task["id"], lab_dir, student["id"]),
             memory=memory,
             ledger=assumptions.render(conn, task['id'], for_professor=True),
         ),
@@ -238,6 +289,24 @@ def execute_professor_supervision_job(
             conn, job_id, lease_id, f"supervision verdict {verdict!r} not one of {VALID_VERDICTS}"
         )
 
+    assessment = str(payload.get("assessment", "")).strip()
+    guidance = str(payload.get("guidance", "")).strip()
+    end_criteria_met = payload.get("end_criteria_met") is True
+    completion_evidence = payload.get("completion_evidence")
+    remaining_gaps = payload.get("remaining_gaps")
+    evidence_ok = (
+        isinstance(completion_evidence, list)
+        and any(str(item).strip() for item in completion_evidence)
+    )
+    gaps_ok = isinstance(remaining_gaps, list) and not remaining_gaps
+    if verdict == "ready" and not (end_criteria_met and evidence_ok and gaps_ok):
+        verdict = "continue"
+        gate_reason = (
+            "Readiness gate refused the requested ready verdict: all end criteria were not "
+            "affirmed with concrete completion evidence and an empty remaining-gaps list."
+        )
+        guidance = f"{gate_reason} {guidance}".strip()
+
     max_rounds = config.max_supervision_rounds(lab_id=lab["id"])
     attempt = _current_attempt(conn, task["id"])
     forced = False
@@ -246,19 +315,17 @@ def execute_professor_supervision_job(
         and max_rounds
         and _round_within_attempt(conn, task["id"], attempt) >= max_rounds
     ):
-        # Terminate a loop that isn't converging -- but by writing up what
-        # exists, not by discarding it. The research is real work; only the
-        # supervisor's appetite for more rounds has run out.
-        verdict = "ready"
+        # A round ceiling is not evidence that the work is publishable.
+        # The old behaviour forced incomplete work into review and paper 55
+        # reached that gate with only ~27% of its end criteria complete.
+        verdict = "abandon"
         forced = True
 
     relpath = f"{lab['id']}/tasks/{task['id']}/supervision/{round_}.md"
-    assessment = str(payload.get("assessment", "")).strip()
-    guidance = str(payload.get("guidance", "")).strip()
     write_artifact(
         lab_dir / relpath,
         f"# Supervision meeting {round_} -- verdict: {verdict}"
-        + (f" (forced at round cap {max_rounds})" if forced else "")
+        + (f" (abandoned at round cap {max_rounds}; not forced ready)" if forced else "")
         + f"\n\n## Assessment\n\n{assessment or '(none given)'}"
         f"\n\n## Guidance\n\n{guidance or '(none given)'}\n",
     )
@@ -332,7 +399,17 @@ def render_student_guidance(conn: sqlite3.Connection, task_id: int, lab_dir: Pat
         f"<supervisor_guidance round=\"{latest['round']}\">\n{body(latest)}\n</supervisor_guidance>",
     ]
     if len(rows) > 1:
-        earlier = "\n\n".join(f"--- Meeting {r['round']} ---\n{body(r)}" for r in rows[:-1])
+        included_earlier = rows[-MAX_FULL_CONTEXT_MEETINGS:-1]
+        omitted = rows[:-MAX_FULL_CONTEXT_MEETINGS]
+        earlier = "\n\n".join(
+            f"--- Meeting {r['round']} ---\n{body(r)}" for r in included_earlier
+        )
+        if omitted:
+            outcomes = ", ".join(f"{r['round']}:{r['verdict']}" for r in omitted)
+            earlier = (
+                f"{len(omitted)} older meetings compacted; outcome index: {outcomes}.\n\n"
+                + earlier
+            )
         out.append(
             "Earlier guidance on this task, for context (do not re-litigate points you have "
             f"already addressed):\n<earlier_guidance>\n{earlier}\n</earlier_guidance>"
