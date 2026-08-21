@@ -979,6 +979,60 @@ def _git(root: Path, *args, timeout: int = 120):
     )
 
 
+def commit_workspace(lab_id: int | None, message: str) -> dict:
+    """Commit whatever an agentic backend left in the lab workspace.
+
+    `apply_patch` runs the test suite and commits, so work arriving that
+    way is versioned and gated. An agentic CLI edits the tree directly and
+    bypasses both, which left lab 9 with 38 uncommitted files and a last
+    commit more than a day older than the artifacts its papers cited as
+    "checked in". Reviewers were right to doubt the provenance.
+
+    Tests are run and their outcome recorded in the commit message, but a
+    failure does NOT revert. `apply_patch` can revert safely because it
+    owns one small diff; here the tree may hold hours of integrated
+    research, and destroying it to punish a red test would lose far more
+    than it protects. Recording the failure keeps the history honest.
+    """
+    root = _repo_root(lab_id)
+    if root is None or not (root / ".git").exists():
+        return {"status": "skipped", "output": "(no workspace repository)"}
+
+    status = _git(root, "status", "--porcelain")
+    if status.returncode != 0:
+        return {"status": "error", "output": f"(git status failed: {status.stderr.strip()})"}
+    if not status.stdout.strip():
+        return {"status": "clean", "output": "(no changes to commit)"}
+    changed = len(status.stdout.strip().splitlines())
+
+    try:
+        tests = subprocess.run(
+            list(APPLY_TEST_COMMAND), cwd=root, capture_output=True, text=True,
+            timeout=WORKSPACE_EXEC_TIMEOUT, stdin=subprocess.DEVNULL,
+        )
+        verdict = "tests passed" if tests.returncode == 0 else f"TESTS FAILED (exit {tests.returncode})"
+        tail = ((tests.stdout or "") + (tests.stderr or "")).strip().splitlines()[-12:]
+    except (OSError, subprocess.SubprocessError) as e:
+        verdict, tail = f"tests could not run ({e})", []
+
+    body = f"{message}\n\n{changed} path(s) changed. {verdict}."
+    if tail:
+        body += "\n\n" + "\n".join(tail)
+
+    add = _git(root, "add", "-A")
+    if add.returncode != 0:
+        return {"status": "error", "output": f"(git add failed: {add.stderr.strip()})"}
+    commit = _git(root, "commit", "-m", body)
+    if commit.returncode != 0:
+        return {"status": "error", "output": f"(git commit failed: {commit.stderr.strip()})"}
+    head = _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
+    return {
+        "status": "ok",
+        "output": f"[{head}] committed {changed} path(s); {verdict}",
+        "tests_passed": verdict == "tests passed",
+    }
+
+
 _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 
 

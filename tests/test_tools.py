@@ -853,3 +853,68 @@ class TaskHomeShellTests(unittest.TestCase):
 
     def test_documented(self):
         self.assertIn("**shell**", tools.render_tool_docs())
+
+
+class CommitWorkspaceTests(unittest.TestCase):
+    """Agentic edits must end up versioned, like apply_patch's do."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for args in (("init", "-q"), ("config", "user.email", "t@t"),
+                     ("config", "user.name", "t")):
+            subprocess.run(["git", *args], cwd=self.root, check=True,
+                           capture_output=True)
+        (self.root / "run_tests.sh").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "run_tests.sh").chmod(0o755)
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=self.root, check=True,
+                       capture_output=True)
+        self.env = mock.patch.dict(
+            os.environ, {tools.REPO_ROOT_ENV + "_9": str(self.root)}, clear=False
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _log(self):
+        return subprocess.run(["git", "log", "--oneline"], cwd=self.root,
+                              capture_output=True, text=True).stdout
+
+    def test_clean_tree_is_a_noop(self):
+        self.assertEqual(tools.commit_workspace(9, "m")["status"], "clean")
+
+    def test_changes_are_committed(self):
+        (self.root / "new.py").write_text("x = 1\n")
+        result = tools.commit_workspace(9, "student work: round 5")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("student work: round 5", self._log())
+
+    def test_untracked_files_are_included(self):
+        (self.root / "artifacts").mkdir()
+        (self.root / "artifacts" / "r.json").write_text("{}")
+        tools.commit_workspace(9, "m")
+        tracked = subprocess.run(["git", "ls-files"], cwd=self.root,
+                                 capture_output=True, text=True).stdout
+        self.assertIn("artifacts/r.json", tracked)
+
+    def test_test_outcome_is_recorded(self):
+        (self.root / "new.py").write_text("x = 1\n")
+        self.assertTrue(tools.commit_workspace(9, "m")["tests_passed"])
+
+    def test_failing_tests_still_commit_but_are_flagged(self):
+        # Reverting here would destroy integrated research, unlike
+        # apply_patch which owns one small diff.
+        (self.root / "run_tests.sh").write_text("#!/bin/sh\nexit 1\n")
+        (self.root / "new.py").write_text("x = 1\n")
+        result = tools.commit_workspace(9, "m")
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["tests_passed"])
+        body = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=self.root,
+                              capture_output=True, text=True).stdout
+        self.assertIn("TESTS FAILED", body)
+        self.assertTrue((self.root / "new.py").exists())
+
+    def test_lab_without_workspace_is_skipped(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(tools.commit_workspace(9, "m")["status"], "skipped")

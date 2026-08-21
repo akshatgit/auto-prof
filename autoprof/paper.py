@@ -433,6 +433,22 @@ def execute_student_work_job(
         student_id=student["id"],
     )
     write_artifact(memory_file, result.text)
+
+    # An agentic backend edits the workspace directly instead of going
+    # through apply_patch, so nothing versioned or tested what it did.
+    # Commit it here, with the test outcome in the message, so the paper's
+    # "checked-in artifact" claim is true and a reviewer can audit which
+    # round produced which file.
+    commit = tools.commit_workspace(
+        lab["id"], f"student work: task {task['id']} round via job {job_id}"
+    )
+    if commit["status"] == "ok":
+        record_job_event(
+            conn, job_id, "student", student["id"], "workspace_committed",
+            "task", task["id"],
+            metadata={"result": commit["output"], "tests_passed": commit["tests_passed"]},
+        )
+
     # Report to the supervisor rather than writing up immediately. The
     # professor decides whether this is ready (docs/DESIGN.md §3.2, and
     # autoprof/supervision.py) -- catching "not actually proved yet" here
