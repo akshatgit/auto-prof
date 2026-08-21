@@ -480,6 +480,25 @@ class EvidenceCwdTests(unittest.TestCase):
         self.assertEqual(opts["cwd"], str(Path(d).resolve()))
         self.assertEqual(opts["sandbox"], "read-only")
 
+    def test_authors_answering_a_reviewer_can_run_things(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+            os.environ, {"AUTOPROF_REPO_ROOT_9": d}
+        ):
+            opts = tools.evidence_cwd_options("codex", 9, writable=True)
+        self.assertEqual(opts["sandbox"], "danger-full-access")
+
+    def test_reviewers_stay_read_only(self):
+        # A reviewer that can mutate the workspace is judging something it
+        # may itself have changed.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+            os.environ, {"AUTOPROF_REPO_ROOT_9": d}
+        ):
+            self.assertEqual(
+                tools.evidence_cwd_options("codex", 9)["sandbox"], "read-only"
+            )
+        self.assertNotIn("writable=True", Path("autoprof/paper_review.py").read_text())
+        self.assertIn("writable=True", Path("autoprof/author_response.py").read_text())
+
     def test_non_codex_backends_get_nothing(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(
             os.environ, {"AUTOPROF_REPO_ROOT_9": d}

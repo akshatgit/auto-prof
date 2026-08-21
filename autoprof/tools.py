@@ -303,7 +303,9 @@ def _repo_root(lab_id: int | None = None) -> Path | None:
     return Path(root).resolve() if root else None
 
 
-def evidence_cwd_options(backend_name: str, lab_id: int | None) -> dict:
+def evidence_cwd_options(
+    backend_name: str, lab_id: int | None, writable: bool = False
+) -> dict:
     """Backend options that let an agentic CLI check a lab's own evidence.
 
     Codex runs commands itself, so its working directory decides which
@@ -313,13 +315,24 @@ def evidence_cwd_options(backend_name: str, lab_id: int | None) -> dict:
     correctly rejects the paper for absent evidence that is in fact
     present. Observed exactly that way on paper 56, reviewer 2.
 
-    Read-only on purpose: reviewing and answering a reviewer are acts of
-    inspection. Only student research jobs get write access.
+    Reviewers get read-only: judging a document is inspection, and a
+    reviewer that can mutate the workspace is judging something it may
+    have changed.
+
+    Authors answering a reviewer need `writable=True`. The rubric invites
+    a reviewer to say "run this and show me", and a read-only author
+    cannot reach the Docker daemon to do it -- a reviewer closed paper 61
+    with "nothing the authors can produce without a Docker daemon would
+    change this verdict", which is a request the system forbade them from
+    satisfying.
     """
     if backend_name != "codex":
         return {}
     root = _repo_root(lab_id)
-    return {"cwd": str(root), "sandbox": "read-only"} if root is not None else {}
+    if root is None:
+        return {}
+    sandbox = "danger-full-access" if writable else "read-only"
+    return {"cwd": str(root), "sandbox": sandbox}
 
 
 def run_readfile(body: str, lab_id: int | None = None) -> dict:

@@ -89,7 +89,8 @@ def execute_author_response_job(
         request=request_file.read_text(errors="replace") if request_file.exists() else "(missing)",
         paper=paper_file.read_text(errors="replace"),
     )
-    opts = tools.evidence_cwd_options(backend.name, task["lab_id"])
+    # Writable: a reviewer may legitimately ask the author to run something.
+    opts = tools.evidence_cwd_options(backend.name, task["lab_id"], writable=True)
     result = jobs.run_with_session(conn, job_id, backend, prompt, **opts)
     if result.rate_limited:
         jobs.record_rate_limit(
