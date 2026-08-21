@@ -379,3 +379,80 @@ class ToolRunDetailTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskFileBrowserTests(unittest.TestCase):
+    """Browsing what a task actually produced, without ssh."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        ids = seed_lab_with_student(self.conn)
+        self.task_id = ids["task_id"]
+        self.lab_id = ids["lab_id"]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+        self.root = self.lab_dir / str(self.lab_id) / "tasks" / str(self.task_id)
+        (self.root / "home" / "artifacts").mkdir(parents=True)
+        (self.root / "home" / "artifacts" / "result.md").write_text("# finding\n\nit held.\n")
+        (self.root / "home" / "blob.bin").write_bytes(b"\x00\x01\x02")
+        (self.root / "notes.txt").write_text("plain notes")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _get(self, rel=""):
+        return webserver.render_task_files(self.conn, self.task_id, rel, self.lab_dir)
+
+    def test_root_listing_shows_entries(self):
+        page = self._get()
+        self.assertIn("home", page)
+        self.assertIn("notes.txt", page)
+
+    def test_directories_are_navigable(self):
+        page = self._get("home/artifacts")
+        self.assertIn("result.md", page)
+
+    def test_file_contents_are_shown(self):
+        page = self._get("home/artifacts/result.md")
+        self.assertIn("it held.", page)
+
+    def test_file_contents_are_escaped(self):
+        (self.root / "x.txt").write_text("<script>alert(1)</script>")
+        page = self._get("x.txt")
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;", page)
+
+    def test_binary_is_named_but_not_dumped(self):
+        page = self._get("home/blob.bin")
+        self.assertIn("not a recognised text type", page)
+
+    def test_parent_traversal_is_refused(self):
+        self.assertIsNone(self._get("../../../etc/passwd"))
+        self.assertIsNone(self._get("home/../../../../etc/passwd"))
+
+    def test_symlink_out_of_the_task_is_refused(self):
+        (self.root / "escape").symlink_to("/etc")
+        self.assertIsNone(self._get("escape/passwd"))
+
+    def test_missing_path_is_a_404(self):
+        self.assertIsNone(self._get("nope/never"))
+
+    def test_unknown_task_is_a_404(self):
+        self.assertIsNone(webserver.render_task_files(self.conn, 9999, "", self.lab_dir))
+
+    def test_large_file_is_truncated_not_refused(self):
+        (self.root / "big.log").write_text("x" * (webserver.TASK_FILE_MAX_BYTES + 5000))
+        page = self._get("big.log")
+        self.assertIn("showing the first", page)
+
+    def test_task_page_links_to_the_browser(self):
+        page = webserver.render_task_detail(self.conn, self.task_id, self.lab_dir)
+        self.assertIn(f"/tasks/{self.task_id}/files", page)
+
+    def test_route_is_registered_for_nested_paths(self):
+        for path in (f"/tasks/{self.task_id}/files",
+                     f"/tasks/{self.task_id}/files/home/artifacts/result.md"):
+            self.assertTrue(
+                any(p.match(path) for p, _ in webserver._ROUTES), path
+            )

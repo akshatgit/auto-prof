@@ -15,6 +15,8 @@ everywhere user/model content is interpolated.
 import html
 import re
 import sqlite3
+from datetime import datetime
+from urllib.parse import quote, unquote
 
 from . import markdown
 from pathlib import Path
@@ -278,6 +280,148 @@ def _read_artifact(lab_dir, relpath: str) -> str | None:
     return target.read_text(errors="replace")
 
 
+# A task's own directory is where its real output lives: the workspace it
+# built, the artefacts it produced, the home directory it clones into. None
+# of that is in the database, so without a browser the only way to see what a
+# lab actually made is to ssh in and look.
+TASK_FILE_MAX_BYTES = 400_000
+_TEXT_SUFFIXES = {
+    ".md", ".txt", ".py", ".sh", ".json", ".toml", ".yaml", ".yml", ".cfg",
+    ".ini", ".diff", ".patch", ".log", ".csv", ".tsv", ".html", ".css", ".js",
+    ".go", ".rs", ".c", ".h", ".tex", ".sql", ".dockerfile", ".conf", "",
+}
+
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _task_root(conn: sqlite3.Connection, task_id: int, lab_dir) -> Path | None:
+    if lab_dir is None:
+        return None
+    row = conn.execute("SELECT lab_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return None
+    root = Path(lab_dir).resolve() / str(row["lab_id"]) / "tasks" / str(task_id)
+    return root if root.is_dir() else None
+
+
+def _confine(root: Path, relpath: str) -> Path | None:
+    """Resolve `relpath` under `root`, or None if it escapes.
+
+    Unlike _read_artifact this path comes straight from the URL, so this
+    is the primary control, not defence in depth. Resolving first and
+    checking parents afterwards also refuses symlinks pointing outside.
+    """
+    root = root.resolve()
+    target = (root / relpath).resolve() if relpath else root
+    if target != root and root not in target.parents:
+        return None
+    return target
+
+
+def _breadcrumb(task_id: int, relpath: str) -> str:
+    parts = [p for p in relpath.split("/") if p]
+    crumbs = [f"<a href='/tasks/{task_id}/files'>task {task_id}</a>"]
+    for i, part in enumerate(parts):
+        sub = "/".join(parts[: i + 1])
+        crumbs.append(f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(part)}</a>")
+    return " / ".join(crumbs)
+
+
+def _render_directory(task_id: int, target: Path, relpath: str) -> str:
+    try:
+        entries = sorted(
+            target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+        )
+    except OSError as e:
+        return f"<p class='muted'>cannot list this directory: {_e(e)}</p>"
+
+    rows = []
+    for entry in entries:
+        sub = f"{relpath}/{entry.name}" if relpath else entry.name
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        when = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        if entry.is_dir():
+            try:
+                count = sum(1 for _ in entry.iterdir())
+                size = f"{count} item{'' if count == 1 else 's'}"
+            except OSError:
+                size = "-"
+            name = f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(entry.name)}/</a>"
+        else:
+            size = _human_size(st.st_size)
+            name = f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(entry.name)}</a>"
+        rows.append(
+            f"<tr><td>{name}</td><td class='muted'>{size}</td>"
+            f"<td class='muted'>{when}</td></tr>"
+        )
+    if not rows:
+        return "<p class='muted'>this directory is empty</p>"
+    return (
+        "<table><tr><th>name</th><th>size</th><th>modified</th></tr>"
+        + "".join(rows)
+        + "</table>"
+    )
+
+
+def _render_file(target: Path) -> str:
+    try:
+        size = target.stat().st_size
+    except OSError as e:
+        return f"<p class='muted'>cannot read: {_e(e)}</p>"
+
+    suffix = target.suffix.lower()
+    if suffix not in _TEXT_SUFFIXES and target.name.lower() not in ("dockerfile", "makefile"):
+        return (
+            f"<p class='muted'>{_e(target.name)} — {_human_size(size)}, "
+            "not a recognised text type, so it is not shown here.</p>"
+        )
+    if size > TASK_FILE_MAX_BYTES:
+        # Truncate rather than refuse: the head of a huge log is usually
+        # the part worth seeing, and refusing outright hides that the
+        # file exists at all.
+        text = target.read_text(errors="replace")[:TASK_FILE_MAX_BYTES]
+        note = (
+            f"<p class='muted'>showing the first {_human_size(TASK_FILE_MAX_BYTES)} "
+            f"of {_human_size(size)}</p>"
+        )
+    else:
+        try:
+            text = target.read_text(errors="replace")
+        except OSError as e:
+            return f"<p class='muted'>cannot read: {_e(e)}</p>"
+        note = f"<p class='muted'>{_human_size(size)}</p>"
+    return note + f"<pre class='doc'>{_e(text)}</pre>"
+
+
+def render_task_files(
+    conn: sqlite3.Connection, task_id: int, relpath: str, lab_dir
+) -> str | None:
+    root = _task_root(conn, task_id, lab_dir)
+    if root is None:
+        return None
+    relpath = unquote(relpath or "").strip("/")
+    target = _confine(root, relpath)
+    if target is None or not target.exists():
+        return None
+
+    body = (
+        f"<p><a href='/tasks/{task_id}'>&larr; task #{task_id}</a></p>"
+        f"<h1>Files</h1><p>{_breadcrumb(task_id, relpath)}</p>"
+    )
+    body += _render_directory(task_id, target, relpath) if target.is_dir() else _render_file(target)
+    label = relpath or "task folder"
+    return _PAGE.format(title=f"autoprof — task {task_id} — {label}", body=body)
+
+
 _MATHJAX_TAG = (
     "<script>window.MathJax={tex:{inlineMath:[['\\\\(','\\\\)']],"
     "displayMath:[['\\\\[','\\\\]'],['$$','$$']],tags:'none'},"
@@ -514,6 +658,8 @@ def render_task_detail(conn: sqlite3.Connection, task_id: int, lab_dir) -> str |
         + (f" &mdash; student <a href='/students/{task['assigned_student_id']}'>"
            f"#{task['assigned_student_id']}</a>" if task["assigned_student_id"] else "")
         + "</p>"
+        f"<p><a href='/tasks/{task['id']}/files'><strong>Browse this task's files &rarr;</strong></a>"
+        " <span class='muted'>workspace, artefacts and the task home</span></p>"
         f"<h2>Long-horizon progress</h2>{render_task_timeline(meetings, rounds)}"
         f"<h2>End criteria</h2><div class='mathdoc'>{_e(task['end_criteria'])}</div>"
         f"<h2>Supervision ({len(meetings)} meetings)</h2>"
@@ -591,6 +737,8 @@ _ROUTES = [
     (re.compile(r"^/papers/(\d+)/full$"), lambda conn, m, d: render_paper_full(conn, int(m.group(1)), d)),
     (re.compile(r"^/reviews/(\d+)$"), lambda conn, m, d: render_review_rationale(conn, int(m.group(1)), d)),
     (re.compile(r"^/tasks/(\d+)$"), lambda conn, m, d: render_task_detail(conn, int(m.group(1)), d)),
+    (re.compile(r"^/tasks/(\d+)/files(?:/(.*))?$"),
+     lambda conn, m, d: render_task_files(conn, int(m.group(1)), m.group(2) or "", d)),
     (re.compile(r"^/tools/(\d+)$"), lambda conn, m, d: render_tool_run(conn, int(m.group(1)), d)),
     (re.compile(r"^/supervision/(\d+)/(\d+)$"),
      lambda conn, m, d: render_supervision(conn, int(m.group(1)), int(m.group(2)), d)),
