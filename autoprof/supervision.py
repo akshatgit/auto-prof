@@ -362,6 +362,34 @@ def execute_professor_supervision_job(
         )
         guidance = f"{gate_reason} {guidance}".strip()
 
+    # A paper that was just rejected cannot be re-declared ready without a
+    # single round of research in between. Task 34 alternated ready ->
+    # write -> reject -> ready nine times in three hours, resubmitting
+    # against reviewer objections nobody had gone back to fix, because
+    # nothing required a research round between an attempt and the next
+    # one. This does not make any paper easier to accept; it only stops
+    # the same paper being thrown at the panel again unchanged.
+    if verdict == "ready":
+        last_paper = conn.execute(
+            "SELECT id, status, created_at FROM papers WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task["id"],),
+        ).fetchone()
+        if last_paper is not None and last_paper["status"] == "rejected":
+            research_since = conn.execute(
+                "SELECT COUNT(*) AS n FROM supervisions WHERE task_id = ? "
+                "AND verdict = 'continue' AND created_at > ?",
+                (task["id"], last_paper["created_at"]),
+            ).fetchone()["n"]
+            if not research_since:
+                verdict = "continue"
+                guidance = (
+                    "Paper #%d was rejected and no research round has happened since. "
+                    "Resubmitting now sends the reviewers the same document against the "
+                    "same objections. Address what they actually named, then say ready. "
+                    "%s" % (last_paper["id"], guidance)
+                ).strip()
+
     max_rounds = config.max_supervision_rounds(lab_id=lab["id"])
     attempt = _current_attempt(conn, task["id"])
     forced = False

@@ -428,3 +428,64 @@ class PriorReviewFeedbackTests(unittest.TestCase):
 
     def test_prompt_template_has_the_slot(self):
         self.assertIn("{prior_reviews}", supervision.SUPERVISION_PROMPT_TEMPLATE)
+
+
+class ResubmitGuardTests(unittest.TestCase):
+    """A rejected paper needs a research round before the next attempt."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _paper(self, status, created_at="2026-08-21 04:00:00"):
+        cur = self.conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round, "
+            "created_at) VALUES (?, ?, 'p.html', 'T', ?, 1, ?)",
+            (self.ids["task_id"], self.ids["student_id"], status, created_at),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def _meeting(self, verdict, created_at):
+        self.conn.execute(
+            "INSERT INTO supervisions (task_id, student_id, round, verdict, guidance_path, "
+            "created_at) VALUES (?, ?, 99, ?, 'g.md', ?)",
+            (self.ids["task_id"], self.ids["student_id"], verdict, created_at),
+        )
+        self.conn.commit()
+
+    def _run_ready(self):
+        payload = {
+            "verdict": "ready", "assessment": "done", "guidance": "write it up",
+            "end_criteria_met": True, "completion_evidence": ["artifact"],
+            "remaining_gaps": [],
+        }
+        backend = ScriptedBackend(BackendResult(text=json.dumps(payload)))
+        job_id = _enqueue(self.conn, self.ids["task_id"])
+        supervision.execute_professor_supervision_job(self.conn, job_id, backend, self.lab_dir)
+        return self.conn.execute(
+            "SELECT verdict FROM supervisions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (self.ids["task_id"],),
+        ).fetchone()["verdict"]
+
+    def test_ready_survives_when_no_paper_exists(self):
+        self.assertEqual(self._run_ready(), "ready")
+
+    def test_ready_is_downgraded_straight_after_a_rejection(self):
+        self._paper("rejected")
+        self.assertEqual(self._run_ready(), "continue")
+
+    def test_ready_survives_after_a_research_round(self):
+        self._paper("rejected", created_at="2026-08-21 04:00:00")
+        self._meeting("continue", "2026-08-21 04:30:00")
+        self.assertEqual(self._run_ready(), "ready")
+
+    def test_an_accepted_paper_does_not_block_a_later_ready(self):
+        self._paper("accepted")
+        self.assertEqual(self._run_ready(), "ready")
