@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .base import Backend, BackendResult
@@ -51,6 +52,18 @@ _UNIT_SECONDS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hour": 3600}
 # Distinguishes "caller passed no timeout" from "caller explicitly passed
 # None", which now means something specific (run with no wall-clock limit).
 _UNSET = object()
+
+# Debug output is useful for OpenAI support, but it can contain response
+# headers (including cookies).  Raw RUST_LOG output must therefore never be
+# copied into the job database or a support artifact.  The diagnostic path
+# below stores only a small allowlist of correlation fields.
+_REQUEST_ID_RE = re.compile(r"\breq_[A-Za-z0-9_-]{8,}\b")
+_SENSITIVE_FIELD_RE = re.compile(
+    r"(?i)([\"']?(?:authorization|cookie|set-cookie|x-api-key|api-key|"
+    r"access_token|refresh_token)[\"']?\s*[:=]\s*)"
+    r"(?:[\"'][^\"']*[\"']|[^,}\s]+)"
+)
+_MAX_ERROR_CHARS = 20_000
 
 
 def _parse_retry_after(text: str) -> float | None:
@@ -117,6 +130,157 @@ def parse_session_id(stdout: str) -> str | None:
     return None
 
 
+def _redact_sensitive(text: str) -> str:
+    """Remove common credential/header values from subprocess diagnostics."""
+    return _SENSITIVE_FIELD_RE.sub(r"\1[REDACTED]", text or "")
+
+
+def _json_error_messages(stdout: str) -> list[str]:
+    """Extract user-facing errors from the CLI JSONL stream."""
+    messages: list[str] = []
+    for line in (stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        candidates = [event.get("message")]
+        error = event.get("error")
+        if isinstance(error, dict):
+            candidates.append(error.get("message"))
+        for message in candidates:
+            if isinstance(message, str) and message.strip() and message not in messages:
+                messages.append(message.strip())
+    return messages
+
+
+def _safe_error_text(stdout: str, stderr: str) -> str:
+    """Return a concise error without persisting raw debug headers."""
+    messages = _json_error_messages(stdout)
+    if messages:
+        return "\n".join(_redact_sensitive(message) for message in messages)[-_MAX_ERROR_CHARS:]
+    fallback = _redact_sensitive((stderr or stdout or "").strip())
+    return fallback[-_MAX_ERROR_CHARS:]
+
+
+def _looks_like_missing_session(output: str) -> bool:
+    """Did Codex refuse because the session we asked to resume is gone?
+
+    Rollouts live on disk under CODEX_HOME and are not permanent: they get
+    cleaned up, and a Codex upgrade can invalidate them. When that happens
+    every later job for that agent fails identically, because the dead
+    thread id is stored in the database and handed back on each attempt --
+    a permanent stall from a recoverable condition. Observed live: job 1310
+    failed with "no rollout found for thread id".
+    """
+    lowered = output.lower()
+    return (
+        "no rollout found for thread" in lowered
+        or ("thread/resume" in lowered and "failed" in lowered)
+        or "session not found" in lowered
+    )
+
+
+def _session_transcript(codex_home: Path, session_id: str | None) -> Path | None:
+    if not session_id:
+        return None
+    matches = list((codex_home / "sessions").glob(f"**/rollout-*-{session_id}.jsonl"))
+    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
+def _diagnostic_events(stdout: str, transcript: Path | None) -> dict:
+    """Collect only correlation-safe fields from JSONL, never raw content."""
+    sources = [("cli", stdout.splitlines())]
+    if transcript is not None:
+        try:
+            sources.append(("session", transcript.read_text().splitlines()))
+        except OSError:
+            pass
+
+    turn_ids: set[str] = set()
+    response_item_ids: set[str] = set()
+    classifier_codes: set[str] = set()
+    errors: set[str] = set()
+    timestamps: set[str] = set()
+    for _source, lines in sources:
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            timestamp = record.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamps.add(timestamp)
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else record
+            item_id = payload.get("id")
+            if isinstance(item_id, str) and item_id.startswith("rs_"):
+                response_item_ids.add(item_id)
+            turn_id = payload.get("turn_id")
+            if isinstance(turn_id, str):
+                turn_ids.add(turn_id)
+            error = payload.get("error")
+            if isinstance(error, dict):
+                code = error.get("codex_error_info")
+                message = error.get("message")
+                if isinstance(code, str):
+                    classifier_codes.add(code)
+                if isinstance(message, str):
+                    errors.add(_redact_sensitive(message))
+            message = payload.get("message")
+            if isinstance(message, str) and (
+                "cybersecurity risk" in message.lower() or "cyber_policy" in message.lower()
+            ):
+                errors.add(_redact_sensitive(message))
+    return {
+        "turn_ids": sorted(turn_ids),
+        "response_item_ids": sorted(response_item_ids),
+        "classifier_codes": sorted(classifier_codes),
+        "errors": sorted(errors),
+        "event_timestamps": sorted(timestamps),
+    }
+
+
+def _write_diagnostic_report(
+    directory: Path,
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int,
+    session_id: str | None,
+    model: str | None,
+    support_case: str | None,
+    codex_home: Path,
+) -> Path | None:
+    """Persist an allowlisted support report; failure must not mask the job result."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        transcript = _session_transcript(codex_home, session_id)
+        events = _diagnostic_events(stdout, transcript)
+        request_ids = sorted(set(_REQUEST_ID_RE.findall(f"{stdout}\n{stderr}")))
+        report = {
+            "schema": "autoprof.codex-support-diagnostic.v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "support_case": support_case,
+            "session_id": session_id,
+            "model": model or "codex-default",
+            "returncode": returncode,
+            # Debug streams can include unrelated analytics requests.  Do
+            # not mislabel a captured req_* value as the model request.
+            "request_ids_unattributed": request_ids,
+            "request_id_caveat": (
+                "Captured req_* values may identify telemetry or another HTTP request; "
+                "OpenAI Support must correlate them before attribution."
+            ),
+            **events,
+        }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        suffix = session_id or "unknown-session"
+        path = directory / f"codex-failure-{stamp}-{suffix}.json"
+        path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        return path
+    except OSError:
+        return None
+
+
 class CodexBackend(Backend):
     name = "codex"
 
@@ -148,26 +312,41 @@ class CodexBackend(Backend):
             cmd += ["--skip-git-repo-check", "--json"]
             if not resuming:
                 cmd += ["--sandbox", opts.get("sandbox", self.sandbox), "-o", str(out_path)]
+                cwd = opts.get("cwd")
+                if cwd:
+                    cmd += ["-C", str(cwd)]
             model = opts.get("model", self.model)
             if model:
                 cmd += ["--model", model]
-            cmd.append(prompt)
+            # Never put the prompt in argv. Linux limits each individual
+            # argument to MAX_ARG_STRLEN (normally 128 KiB), which stranded
+            # paper 55 once the document plus rubric reached 143 KiB even
+            # though ARG_MAX was much larger. `codex exec -` explicitly
+            # reads the prompt from stdin and has no per-argument ceiling.
+            cmd.append("-")
+
+            diagnostics_value = os.environ.get("AUTOPROF_CODEX_DIAGNOSTICS_DIR")
+            diagnostics_dir = Path(diagnostics_value) if diagnostics_value else None
+            child_env = None
+            if diagnostics_dir is not None:
+                child_env = os.environ.copy()
+                child_env["RUST_LOG"] = os.environ.get(
+                    "AUTOPROF_CODEX_RUST_LOG",
+                    "codex_api=trace,codex_http_client=debug,codex_core=info",
+                )
 
             try:
-                # stdin=DEVNULL is load-bearing, not hygiene: `codex exec`
-                # will read additional prompt input from stdin, and
-                # subprocess inherits the parent's stdin by default. Run
-                # from a daemon (or any context where stdin is an open pipe
-                # nobody writes to) it blocks there forever and the call
-                # burns the entire timeout before failing -- observed as a
-                # 900s hang with "Reading additional input from stdin..."
-                # as the only clue.
+                # Supplying `input` both closes stdin deterministically and
+                # carries arbitrarily large prompts without shell/argv
+                # limits. Do not replace this with an inherited stdin: a
+                # daemon pipe nobody writes to blocks forever.
                 proc = self.runner(
                     cmd,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
-                    stdin=subprocess.DEVNULL,
+                    input=prompt,
+                    **({"env": child_env} if child_env is not None else {}),
                 )
             except subprocess.TimeoutExpired as e:
                 # Only reachable when a timeout was explicitly configured.
@@ -190,18 +369,56 @@ class CodexBackend(Backend):
             # emitting thread.started.
             session_id = parse_session_id(proc.stdout or "") or resume_session_id
 
+            diagnostic_path = None
+            if proc.returncode != 0 and diagnostics_dir is not None:
+                codex_home = Path(
+                    (child_env or os.environ).get("CODEX_HOME", str(Path.home() / ".codex"))
+                )
+                diagnostic_path = _write_diagnostic_report(
+                    diagnostics_dir,
+                    stdout=proc.stdout or "",
+                    stderr=proc.stderr or "",
+                    returncode=proc.returncode,
+                    session_id=session_id,
+                    model=model,
+                    support_case=os.environ.get("AUTOPROF_CODEX_SUPPORT_CASE"),
+                    codex_home=codex_home,
+                )
+
             if proc.returncode != 0:
+                # A dead rollout is not a failed run, it is a lost thread.
+                # Start a fresh session rather than failing this job and
+                # every job after it. The prompt already carries the
+                # agent's memory, so the cost is lost conversational
+                # context, not lost research.
+                if (
+                    resuming
+                    and _looks_like_missing_session(combined_output)
+                    and not opts.get("_session_restarted")
+                ):
+                    fresh = dict(opts)
+                    fresh.pop("resume_session_id", None)
+                    fresh["_session_restarted"] = True
+                    return self.run(prompt, **fresh)
                 if _looks_rate_limited(combined_output) or _looks_token_exhausted(combined_output):
                     return BackendResult(
                         text="",
                         rate_limited=True,
                         retry_after_seconds=_parse_retry_after(combined_output),
                         session_id=session_id,
+                        raw=(
+                            {"diagnostic_path": str(diagnostic_path)}
+                            if diagnostic_path is not None else None
+                        ),
                     )
                 return BackendResult(
                     text="",
-                    error=(proc.stderr or proc.stdout or "").strip(),
+                    error=_safe_error_text(proc.stdout or "", proc.stderr or ""),
                     session_id=session_id,
+                    raw=(
+                        {"diagnostic_path": str(diagnostic_path)}
+                        if diagnostic_path is not None else None
+                    ),
                 )
 
             # On a resume there is no -o file, so the answer comes from the

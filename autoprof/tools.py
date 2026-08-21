@@ -153,7 +153,7 @@ Give JSON, not drawing code.
 `kind` is "line", "step" or "scatter". Each series needs a `name` (it is directly labelled) and \
 `points` as [x, y] pairs. Up to {max_series} series; axes are chosen automatically.
 
-**fetch** -- retrieve a URL over HTTPS, when your lab has an allowlist configured. Use this to gather DATA your research needs. Everything you fetch is stored, so a claim resting on it can be re-checked against exactly what you retrieved.
+**fetch** -- retrieve a URL over HTTPS. Use this to gather DATA your research needs. Your lab may restrict this to an allowlist of hosts; you will be told the allowlist if you hit it. Everything you fetch is stored, so a claim resting on it can be re-checked against exactly what you retrieved.
 
 ```tool:fetch
 https://example.org/data/series.csv
@@ -277,6 +277,25 @@ def _scoped_env(name: str, lab_id: int | None = None) -> str | None:
     return os.environ.get(name)
 
 
+def _lab_gate_open(env_name: str, lab_id: int | None) -> bool:
+    """Is `env_name`'s capability open to this lab?
+
+    Default-open. These gates were default-closed, which cost Lab 9 three
+    days: a student cannot discover that the tool it needs exists but is
+    switched off, so it reasons its way around the absence and writes a
+    weaker paper instead. An operator who wants a lab fenced in still can
+    -- SET the variable and it becomes a strict allowlist, and a value
+    naming no labs (e.g. "none") closes it entirely.
+    """
+    raw = _scoped_env(env_name, lab_id)
+    if raw is None:
+        return True
+    allowed = {x.strip() for x in raw.split(",") if x.strip()}
+    if not allowed:
+        return True
+    return "*" in allowed or (lab_id is not None and str(lab_id) in allowed)
+
+
 def _repo_root(lab_id: int | None = None) -> Path | None:
     import os
 
@@ -314,19 +333,29 @@ def run_readfile(body: str, lab_id: int | None = None) -> dict:
     }
 
 
-def _fetch_allowlist(lab_id: int | None = None) -> list[str]:
-    raw = _scoped_env(FETCH_ALLOW_ENV, lab_id) or ""
-    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+def _fetch_allowlist(lab_id: int | None = None) -> list[str] | None:
+    """Hosts this lab may fetch, or None meaning "any host".
+
+    Unset is open. Setting the variable turns it back into a strict
+    allowlist for that lab.
+    """
+    raw = _scoped_env(FETCH_ALLOW_ENV, lab_id)
+    if raw is None:
+        return None
+    hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
+    if not hosts or "*" in hosts:
+        return None
+    return hosts
 
 
 def run_fetch(body: str, lab_id: int | None = None) -> dict:
     """Fetch a URL over HTTP(S) and return the body.
 
-    Allowlisted by host suffix, not open. Two reasons: a lab that can
-    reach anything can be steered by whatever it reads -- fetched text is
-    untrusted input, not instructions -- and an allowlist makes the data
-    provenance of a paper checkable rather than "the model looked
-    something up once".
+    Open by default; allowlisted by host suffix when an operator sets
+    AUTOPROF_FETCH_ALLOW for the lab. Fetched text is untrusted input, not
+    instructions, in either case -- that is enforced by how the result is
+    presented to the model, not by the size of the allowlist -- and every
+    response is stored so a paper's data provenance stays checkable.
 
     GET only, size- and time-capped, and every response is stored as an
     artifact so a claim resting on fetched data can be re-examined against
@@ -337,12 +366,6 @@ def run_fetch(body: str, lab_id: int | None = None) -> dict:
     import urllib.request
 
     allow = _fetch_allowlist(lab_id)
-    if not allow:
-        return {
-            "status": "error",
-            "output": f"(no internet access for this lab; set {FETCH_ALLOW_ENV} to a "
-                      "comma-separated host allowlist to enable it)",
-        }
 
     url = body.strip().splitlines()[0].strip() if body.strip() else ""
     if not url:
@@ -352,7 +375,7 @@ def run_fetch(body: str, lab_id: int | None = None) -> dict:
     if parsed.scheme not in ("http", "https"):
         return {"status": "error", "output": f"({parsed.scheme or 'no'} scheme not allowed; use https)"}
     host = (parsed.hostname or "").lower()
-    if not any(host == a or host.endswith("." + a) for a in allow):
+    if allow is not None and not any(host == a or host.endswith("." + a) for a in allow):
         return {
             "status": "error",
             "output": f"({host or 'that host'} is not on this lab's allowlist: {', '.join(allow)})",
@@ -419,12 +442,11 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
     if spec.get("command") is not None:
         return run_workspace_experiment(spec, lab_id)
 
-    allow = {x.strip() for x in os.environ.get(EXPERIMENT_LABS_ENV, "").split(",") if x.strip()}
-    if not allow or (lab_id is not None and str(lab_id) not in allow):
+    if not _lab_gate_open(EXPERIMENT_LABS_ENV, lab_id):
         return {
             "status": "error",
-            "output": "(this lab may not run experiments; set "
-                      f"{EXPERIMENT_LABS_ENV} to a comma-separated list of lab ids)",
+            "output": f"(child-lab experiments are switched off for this lab by "
+                      f"{EXPERIMENT_LABS_ENV})",
         }
     if spec.get("measure") is not None:
         db_path = os.environ.get("AUTOPROF_DB_PATH")
@@ -444,7 +466,10 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
     env = dict(os.environ)
     env.pop(EXPERIMENT_LABS_ENV, None)          # no nested experiments
     env.pop(REPO_ROOT_ENV, None)                # no repo access from a child run
-    env.pop(FETCH_ALLOW_ENV, None)              # no network for child students
+    # Popping this used to mean "closed"; with fetch open by default it means
+    # the opposite, so name a host set that matches nothing instead. A child
+    # lab spawned by an experiment is a treatment arm, not a researcher.
+    env[FETCH_ALLOW_ENV] = "invalid.localdomain"
     env["AUTOPROF_GENERATION_BACKEND"] = env.get("AUTOPROF_GENERATION_BACKEND", "codex")
     for key, value in (spec.get("config") or {}).items():
         if str(key).startswith("AUTOPROF_"):
@@ -502,16 +527,11 @@ def run_workspace_experiment(spec: dict, lab_id: int | None) -> dict:
     """
     import os
 
-    allowed = {
-        x.strip()
-        for x in (_scoped_env(WORKSPACE_EXEC_LABS_ENV, lab_id) or "").split(",")
-        if x.strip()
-    }
-    if lab_id is None or (str(lab_id) not in allowed and "*" not in allowed):
+    if not _lab_gate_open(WORKSPACE_EXEC_LABS_ENV, lab_id):
         return {
             "status": "error",
-            "output": "(this lab may not execute workspace experiments; configure "
-                      f"{WORKSPACE_EXEC_LABS_ENV}_{lab_id})",
+            "output": "(workspace execution is switched off for this lab by "
+                      f"{WORKSPACE_EXEC_LABS_ENV})",
         }
 
     root = _repo_root(lab_id)
@@ -639,16 +659,10 @@ def run_shell(body: str, *, lab_id: int | None, task_id: int | None, lab_dir) ->
     """
     import os
 
-    allowed = {
-        x.strip()
-        for x in (_scoped_env(TASK_HOME_LABS_ENV, lab_id) or "").split(",")
-        if x.strip()
-    }
-    if lab_id is None or (str(lab_id) not in allowed and "*" not in allowed):
+    if not _lab_gate_open(TASK_HOME_LABS_ENV, lab_id):
         return {
             "status": "error",
-            "output": "(this lab has no task home; configure "
-                      f"{TASK_HOME_LABS_ENV}_{lab_id})",
+            "output": f"(the task home is switched off for this lab by {TASK_HOME_LABS_ENV})",
         }
     if task_id is None or lab_dir is None:
         return {"status": "error", "output": "(no task context for a task home)"}

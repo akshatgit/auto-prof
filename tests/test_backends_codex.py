@@ -1,7 +1,10 @@
 import os
 from unittest import mock
 import subprocess
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from autoprof.backends import codex as codex_module
@@ -37,6 +40,7 @@ class CodexBackendTests(unittest.TestCase):
 
         def runner(cmd, **kwargs):
             captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input")
             out_path = cmd[cmd.index("-o") + 1]
             with open(out_path, "w") as f:
                 f.write("ok")
@@ -48,13 +52,15 @@ class CodexBackendTests(unittest.TestCase):
         self.assertIn("--sandbox", captured["cmd"])
         self.assertIn("codex", captured["cmd"])
         self.assertIn("exec", captured["cmd"])
-        self.assertIn("hello", captured["cmd"])
+        self.assertEqual(captured["cmd"][-1], "-")
+        self.assertEqual(captured["input"], "hello")
 
     def test_model_override_passed_through(self):
         captured = {}
 
         def runner(cmd, **kwargs):
             captured["cmd"] = cmd
+            captured["input"] = kwargs.get("input")
             out_path = cmd[cmd.index("-o") + 1]
             with open(out_path, "w") as f:
                 f.write("ok")
@@ -65,6 +71,24 @@ class CodexBackendTests(unittest.TestCase):
         self.assertIn("--model", captured["cmd"])
         self.assertIn("o3", captured["cmd"])
 
+    def test_fresh_run_accepts_a_scoped_working_directory(self):
+        captured = {}
+
+        def runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            out_path = cmd[cmd.index("-o") + 1]
+            with open(out_path, "w") as f:
+                f.write("ok")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        CodexBackend(runner=runner).run(
+            "implement", sandbox="workspace-write", cwd="/tmp/lab-workspace"
+        )
+        self.assertEqual(
+            captured["cmd"][captured["cmd"].index("--sandbox") + 1], "workspace-write"
+        )
+        self.assertEqual(captured["cmd"][captured["cmd"].index("-C") + 1], "/tmp/lab-workspace")
+
     def test_nonzero_exit_without_rate_limit_signal_is_a_hard_error(self):
         def runner(cmd, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="some unrelated crash")
@@ -74,6 +98,93 @@ class CodexBackendTests(unittest.TestCase):
         self.assertTrue(result.is_error)
         self.assertFalse(result.rate_limited)
         self.assertIn("some unrelated crash", result.error)
+
+    def test_error_redacts_sensitive_debug_headers(self):
+        def runner(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=1,
+                stdout='',
+                stderr=(
+                    'headers={"authorization": "Bearer secret-token", '
+                    '"set-cookie": "session=secret-cookie"} failure'
+                ),
+            )
+
+        result = CodexBackend(runner=runner).run("hello")
+        self.assertTrue(result.is_error)
+        self.assertNotIn("secret-token", result.error)
+        self.assertNotIn("secret-cookie", result.error)
+        self.assertIn("[REDACTED]", result.error)
+
+    def test_opt_in_diagnostic_is_allowlisted_and_passes_rust_log(self):
+        captured = {}
+        session_id = "01a-test-session"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            diagnostics = root / "diagnostics"
+            codex_home = root / "codex-home"
+            transcript_dir = codex_home / "sessions" / "2026" / "08" / "19"
+            transcript_dir.mkdir(parents=True)
+            transcript = transcript_dir / f"rollout-test-{session_id}.jsonl"
+            transcript.write_text(
+                json.dumps({
+                    "timestamp": "2026-08-19T02:14:24Z",
+                    "type": "response_item",
+                    "payload": {"type": "reasoning", "id": "rs_support_item"},
+                }) + "\n" + json.dumps({
+                    "timestamp": "2026-08-19T02:14:43Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": "turn-support-id",
+                        "error": {
+                            "message": "flagged for possible cybersecurity risk",
+                            "codex_error_info": "cyber_policy",
+                        },
+                    },
+                }) + "\n"
+            )
+
+            def runner(cmd, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout=(
+                        json.dumps({"type": "thread.started", "thread_id": session_id})
+                        + "\n"
+                        + json.dumps({
+                            "type": "error",
+                            "message": "flagged for possible cybersecurity risk",
+                        })
+                    ),
+                    stderr=(
+                        'headers={"set-cookie":"private-cookie"} '
+                        'x-oai-request-id=req_support123456'
+                    ),
+                )
+
+            env = {
+                "AUTOPROF_CODEX_DIAGNOSTICS_DIR": str(diagnostics),
+                "AUTOPROF_CODEX_SUPPORT_CASE": "13432300",
+                "CODEX_HOME": str(codex_home),
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                result = CodexBackend(runner=runner).run("benign prompt")
+
+            self.assertIn("RUST_LOG", captured["env"])
+            self.assertTrue(result.is_error)
+            self.assertIsNotNone(result.raw)
+            report_path = Path(result.raw["diagnostic_path"])
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["support_case"], "13432300")
+            self.assertEqual(report["session_id"], session_id)
+            self.assertEqual(report["turn_ids"], ["turn-support-id"])
+            self.assertEqual(report["response_item_ids"], ["rs_support_item"])
+            self.assertEqual(report["classifier_codes"], ["cyber_policy"])
+            self.assertEqual(report["request_ids_unattributed"], ["req_support123456"])
+            serialized = report_path.read_text()
+            self.assertNotIn("private-cookie", serialized)
+            self.assertNotIn("benign prompt", serialized)
 
     def test_rate_limit_signal_sets_rate_limited_not_error(self):
         def runner(cmd, **kwargs):
@@ -125,10 +236,10 @@ class CodexBackendTests(unittest.TestCase):
         self.assertEqual(CodexBackend().name, "codex")
 
 
-class StdinIsClosedTests(unittest.TestCase):
-    def test_run_passes_devnull_as_stdin(self):
-        """`codex exec` reads extra prompt input from stdin; an inherited
-        stdin makes it block until the timeout expires (see codex.py)."""
+class PromptTransportTests(unittest.TestCase):
+    def test_run_pipes_prompt_to_stdin(self):
+        """Prompts must not be argv entries: one 128 KiB argument fails
+        with E2BIG even when the process-wide ARG_MAX is much larger."""
         captured = {}
 
         def fake_runner(cmd, **kwargs):
@@ -136,7 +247,21 @@ class StdinIsClosedTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         CodexBackend(runner=fake_runner).run("hello")
-        self.assertEqual(captured.get("stdin"), subprocess.DEVNULL)
+        self.assertEqual(captured.get("input"), "hello")
+
+    def test_large_prompt_never_appears_in_argv(self):
+        captured = {}
+        prompt = "x" * 150_000
+
+        def fake_runner(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        CodexBackend(runner=fake_runner).run(prompt)
+        self.assertNotIn(prompt, captured["cmd"])
+        self.assertEqual(captured["cmd"][-1], "-")
+        self.assertEqual(captured["input"], prompt)
 
 
 class NoWallClockLimitTests(unittest.TestCase):
@@ -339,3 +464,56 @@ class FinalMessageParsingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleSessionRecoveryTests(unittest.TestCase):
+    """A resume against a vanished rollout restarts instead of stalling."""
+
+    MISSING = (
+        "Error: thread/resume: thread/resume failed: no rollout found for "
+        "thread id cdf0743f-70e1-462e-9bbd-f04c4c4cfe94 (code -32600)"
+    )
+
+    def test_detector_matches_the_observed_failure(self):
+        self.assertTrue(codex_module._looks_like_missing_session(self.MISSING))
+
+    def test_detector_ignores_ordinary_failures(self):
+        self.assertFalse(codex_module._looks_like_missing_session("compile error: bad syntax"))
+
+    def test_resume_failure_retries_as_a_fresh_session(self):
+        calls = []
+
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            if "resume" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", self.MISSING)
+            out = kwargs.get("_out")
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                '{"type":"thread.started","thread_id":"new-thread"}\n'
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"recovered"}}\n',
+                "",
+            )
+
+        backend = CodexBackend(runner=runner)
+        result = backend.run("prompt", resume_session_id="dead-thread")
+
+        self.assertEqual(result.error, None)
+        self.assertIn("recovered", result.text)
+        self.assertEqual(result.session_id, "new-thread")
+        self.assertIn("resume", calls[0])
+        self.assertNotIn("resume", calls[1])
+
+    def test_it_does_not_loop_forever(self):
+        calls = []
+
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", self.MISSING)
+
+        backend = CodexBackend(runner=runner)
+        result = backend.run("prompt", resume_session_id="dead-thread")
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(result.error)

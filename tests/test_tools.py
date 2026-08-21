@@ -493,11 +493,18 @@ class FetchTests(unittest.TestCase):
     """Internet access is allowlisted, not open: an agent that can reach
     anything can be steered by whatever it reads."""
 
-    def test_disabled_without_an_allowlist(self):
+    def test_open_without_an_allowlist(self):
+        # Default-open: an unset allowlist means any host, so the request
+        # gets as far as the network rather than being refused by policy.
         with mock.patch.dict(os.environ, {}, clear=True):
-            result = tools.run_fetch("https://example.com")
-        self.assertEqual(result["status"], "error")
-        self.assertIn("no internet access", result["output"])
+            with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+                result = tools.run_fetch("https://example.com")
+        self.assertNotIn("not on this lab's allowlist", result["output"])
+        self.assertNotIn("no internet access", result["output"])
+
+    def test_star_allowlist_means_any_host(self):
+        with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "*"}, clear=True):
+            self.assertIsNone(tools._fetch_allowlist(None))
 
     def test_host_not_on_the_allowlist_is_refused(self):
         with mock.patch.dict(os.environ, {tools.FETCH_ALLOW_ENV: "data.gov,example.com"}):
@@ -546,11 +553,18 @@ class VerifyIsolationTests(unittest.TestCase):
 class ExperimentTests(unittest.TestCase):
     """Only a lab whose subject is this system may spawn research runs."""
 
-    def test_disabled_by_default(self):
+    def test_enabled_by_default(self):
+        # Default-open: refusal, if any, must come from missing wiring
+        # (AUTOPROF_DB_PATH) and not from the lab gate.
         with mock.patch.dict(os.environ, {}, clear=True):
             result = tools.run_experiment('{"idea": "x"}', lab_id=2)
+        self.assertNotIn("switched off", result["output"])
+
+    def test_switched_off_when_the_gate_names_other_labs(self):
+        with mock.patch.dict(os.environ, {tools.EXPERIMENT_LABS_ENV: "7"}, clear=True):
+            result = tools.run_experiment('{"idea": "x"}', lab_id=2)
         self.assertEqual(result["status"], "error")
-        self.assertIn("may not run experiments", result["output"])
+        self.assertIn("switched off", result["output"])
 
     def test_only_allowlisted_labs(self):
         with mock.patch.dict(os.environ, {tools.EXPERIMENT_LABS_ENV: "2"}):
@@ -769,8 +783,14 @@ class TaskHomeShellTests(unittest.TestCase):
     def _run(self, body, lab_id=9, task_id=34):
         return tools.run_shell(body, lab_id=lab_id, task_id=task_id, lab_dir=self.lab_dir)
 
-    def test_disabled_lab_is_refused(self):
-        result = self._run("echo hi", lab_id=7)
+    def test_open_by_default_for_an_unnamed_lab(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = self._run("echo hi", lab_id=7)
+        self.assertEqual(result["status"], "ok")
+
+    def test_switched_off_when_the_gate_names_other_labs(self):
+        with mock.patch.dict(os.environ, {tools.TASK_HOME_LABS_ENV: "9"}, clear=True):
+            result = self._run("echo hi", lab_id=7)
         self.assertEqual(result["status"], "error")
         self.assertIn(tools.TASK_HOME_LABS_ENV, result["output"])
 
