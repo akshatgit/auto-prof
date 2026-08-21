@@ -201,19 +201,19 @@ def _serialize_workspace_writers(conn: sqlite3.Connection, candidates: list) -> 
     specified in terms of task 34's tool, so they must share the checkout.
     They just must not write it at the same time.
     """
-    busy = {
-        row["lab_id"]
-        for row in conn.execute(
-            "SELECT DISTINCT t.lab_id AS lab_id FROM jobs j "
-            "JOIN tasks t ON t.id = j.target_id "
-            "WHERE j.status = 'running' AND j.target_type = 'task' "
-            "AND j.kind IN ({})".format(
-                ",".join("?" * len(WORKSPACE_WRITER_KINDS))
-            ),
-            tuple(sorted(WORKSPACE_WRITER_KINDS)),
-        )
-        if row["lab_id"] is not None
-    }
+    # Resolve through _job_lab_id rather than a join on tasks: author_response
+    # targets a PAPER, so a task-only join silently reports no owning lab and
+    # lets a paper-targeted writer run alongside a task-targeted one.
+    running = conn.execute(
+        "SELECT target_type, target_id FROM jobs WHERE status = 'running' "
+        "AND kind IN ({})".format(",".join("?" * len(WORKSPACE_WRITER_KINDS))),
+        tuple(sorted(WORKSPACE_WRITER_KINDS)),
+    ).fetchall()
+    busy = set()
+    for row in running:
+        lab_id = _job_lab_id(conn, row)
+        if lab_id is not None:
+            busy.add(lab_id)
 
     kept = []
     for candidate in candidates:

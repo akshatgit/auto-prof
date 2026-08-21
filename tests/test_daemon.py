@@ -716,6 +716,22 @@ class WorkspaceSerializationTests(unittest.TestCase):
         self._job("student_work", self.task_b)
         self.assertEqual(self._kept_ids(), [a])
 
+    def test_a_running_paper_targeted_writer_also_holds_the_lab(self):
+        # author_response targets a paper, not a task; a task-only join
+        # missed it and let two writers into one workspace.
+        paper_id = self.conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'T', 'in_review', 1)",
+            (self.task_a, self.ids["student_id"]),
+        ).lastrowid
+        self.conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('author_response', 'paper', ?, 'running')", (paper_id,),
+        )
+        self.conn.commit()
+        self._job("student_work", self.task_b)
+        self.assertEqual(self._kept_ids(), [])
+
     def test_other_labs_are_unaffected(self):
         prof = self.conn.execute(
             "SELECT professor_id FROM labs WHERE id = ?", (self.lab_id,)
