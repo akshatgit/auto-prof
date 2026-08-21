@@ -460,6 +460,94 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
     conn.commit()
 
 
+def sweep_stalled_reviews(conn: sqlite3.Connection) -> dict:
+    """Rescue papers left `in_review` with nothing running to advance them.
+
+    Finalisation only ever runs at the tail of a COMPLETING review job, so a
+    review that exhausts its retries takes the paper down with it: the round
+    can never be tallied and the paper sits in_review forever. An expired
+    OAuth session stranded paper 67 exactly that way, and the sweep found
+    two older casualties in other labs -- paper 54 stuck at round 35 and
+    paper 51 at round 7, for days.
+
+    For each stranded paper: if every reviewer has filed, tally it; if some
+    have not, re-queue only the missing seats whose previous job actually
+    failed, so a genuinely broken backend cannot spin new jobs forever.
+    """
+    finalized, requeued = [], []
+    stranded = conn.execute(
+        "SELECT p.id, p.review_round FROM papers p WHERE p.status = 'in_review' "
+        "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.target_type = 'paper' "
+        "  AND j.target_id = p.id AND j.status IN ('pending', 'running'))"
+    ).fetchall()
+
+    for paper in stranded:
+        paper_id, review_round = paper["id"], paper["review_round"]
+        unanswered = conn.execute(
+            "SELECT COUNT(*) AS n FROM review_exchanges WHERE target_type='paper' "
+            "AND target_id=? AND review_round=? AND response_path IS NULL",
+            (paper_id, review_round),
+        ).fetchone()["n"]
+        if unanswered:
+            # An author response is owed but no job exists to write it.
+            # Re-open it rather than tallying over the reviewer's question.
+            requeued.extend(_requeue_missing(conn, paper_id, review_round, "author_response"))
+            continue
+
+        filed = {
+            row["reviewer_index"]
+            for row in conn.execute(
+                "SELECT reviewer_index FROM reviews WHERE target_type='paper' "
+                "AND target_id=? AND review_round=?",
+                (paper_id, review_round),
+            )
+        }
+        if len(filed) >= REVIEWER_COUNT:
+            # Attribute the tally to the last job that touched this paper --
+            # usually the failed review that stranded it. events.job_id is a
+            # foreign key, so a synthetic id would be rejected.
+            last = conn.execute(
+                "SELECT id FROM jobs WHERE target_type='paper' AND target_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (paper_id,),
+            ).fetchone()
+            if last is None:
+                continue
+            _maybe_finalize(conn, paper_id, review_round, last["id"])
+            finalized.append(paper_id)
+        else:
+            requeued.extend(
+                _requeue_missing(conn, paper_id, review_round, "paper_review", filed)
+            )
+    if finalized or requeued:
+        conn.commit()
+    return {"finalized": finalized, "requeued": requeued}
+
+
+def _requeue_missing(
+    conn: sqlite3.Connection, paper_id: int, review_round: int, kind: str,
+    filed: set[int] | None = None,
+) -> list[int]:
+    """Re-queue seats whose previous job failed. Never invents a new seat."""
+    new_ids = []
+    rows = conn.execute(
+        "SELECT DISTINCT reviewer_index FROM jobs WHERE target_type='paper' "
+        "AND target_id=? AND review_round=? AND kind=? AND status='failed'",
+        (paper_id, review_round, kind),
+    ).fetchall()
+    for row in rows:
+        index = row["reviewer_index"]
+        if filed is not None and index in filed:
+            continue
+        cur = conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, review_round, "
+            "reviewer_index, status) VALUES (?, 'paper', ?, ?, ?, 'pending')",
+            (kind, paper_id, review_round, index),
+        )
+        new_ids.append(cur.lastrowid)
+    return new_ids
+
+
 def resubmit_paper(conn: sqlite3.Connection, paper_id: int) -> list[int]:
     """Start a fresh review round on a rejected paper (§3.2 step 4).
 

@@ -488,3 +488,94 @@ class RevisionEnqueueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SweepStalledReviewsTests(unittest.TestCase):
+    """A failed review must not strand its paper forever."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        cur = self.conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'T', 'in_review', 1)",
+            (self.ids["task_id"], self.ids["student_id"]),
+        )
+        self.paper_id = cur.lastrowid
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _file_review(self, index, verdict="reject"):
+        self.conn.execute(
+            "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, "
+            "verdict, rationale_path) VALUES ('paper', ?, 1, ?, ?, 'r.md')",
+            (self.paper_id, index, verdict),
+        )
+        self.conn.commit()
+
+    def _job(self, kind, index, status):
+        cur = self.conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, review_round, reviewer_index, "
+            "status) VALUES (?, 'paper', ?, 1, ?, ?)",
+            (kind, self.paper_id, index, status),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def _status(self):
+        return self.conn.execute(
+            "SELECT status FROM papers WHERE id = ?", (self.paper_id,)
+        ).fetchone()["status"]
+
+    def test_all_reviews_filed_gets_tallied(self):
+        for i in (1, 2, 3):
+            self._file_review(i)
+        self._job("paper_review", 1, "failed")
+        out = paper_review.sweep_stalled_reviews(self.conn)
+        self.assertIn(self.paper_id, out["finalized"])
+        self.assertEqual(self._status(), "rejected")
+
+    def test_two_strong_accepts_still_pass_through_the_sweep(self):
+        self._file_review(1, "strong_accept")
+        self._file_review(2, "strong_accept")
+        self._file_review(3, "reject")
+        self._job("paper_review", 3, "failed")
+        paper_review.sweep_stalled_reviews(self.conn)
+        self.assertEqual(self._status(), "accepted")
+
+    def test_missing_review_with_a_failed_job_is_requeued(self):
+        self._file_review(1)
+        self._file_review(2)
+        self._job("paper_review", 3, "failed")
+        out = paper_review.sweep_stalled_reviews(self.conn)
+        self.assertTrue(out["requeued"])
+        self.assertEqual(self._status(), "in_review")
+
+    def test_a_live_job_means_no_interference(self):
+        for i in (1, 2, 3):
+            self._file_review(i)
+        self._job("paper_review", 1, "running")
+        out = paper_review.sweep_stalled_reviews(self.conn)
+        self.assertEqual(out["finalized"], [])
+        self.assertEqual(self._status(), "in_review")
+
+    def test_missing_review_without_a_failed_job_is_not_invented(self):
+        self._file_review(1)
+        out = paper_review.sweep_stalled_reviews(self.conn)
+        self.assertEqual(out["requeued"], [])
+
+    def test_unanswered_exchange_is_not_tallied_over(self):
+        for i in (1, 2, 3):
+            self._file_review(i)
+        self.conn.execute(
+            "INSERT INTO review_exchanges (target_type, target_id, review_round, "
+            "reviewer_index, exchange_round, request_path) "
+            "VALUES ('paper', ?, 1, 1, 1, 'q.md')",
+            (self.paper_id,),
+        )
+        self._job("author_response", 1, "failed")
+        out = paper_review.sweep_stalled_reviews(self.conn)
+        self.assertEqual(out["finalized"], [])
+        self.assertTrue(out["requeued"])

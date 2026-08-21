@@ -286,6 +286,10 @@ def run_tick(
     db_path=None,
 ) -> dict:
     reclaimed = jobs.reclaim_expired_leases(conn)
+    # A review job that exhausts its retries leaves its paper in_review with
+    # nothing left to tally it. Recover those before dispatching.
+    from .paper_review import sweep_stalled_reviews
+    sweep_stalled_reviews(conn)
     dispatched = dispatch_pending_jobs(
         conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers,
         workers=workers, db_path=db_path,
