@@ -303,6 +303,25 @@ def _repo_root(lab_id: int | None = None) -> Path | None:
     return Path(root).resolve() if root else None
 
 
+def evidence_cwd_options(backend_name: str, lab_id: int | None) -> dict:
+    """Backend options that let an agentic CLI check a lab's own evidence.
+
+    Codex runs commands itself, so its working directory decides which
+    files it can see. Without this, an author asked to produce
+    `artifacts/task34_readiness_round60.json` looks in the daemon's
+    directory, truthfully reports the file missing, and the reviewer
+    correctly rejects the paper for absent evidence that is in fact
+    present. Observed exactly that way on paper 56, reviewer 2.
+
+    Read-only on purpose: reviewing and answering a reviewer are acts of
+    inspection. Only student research jobs get write access.
+    """
+    if backend_name != "codex":
+        return {}
+    root = _repo_root(lab_id)
+    return {"cwd": str(root), "sandbox": "read-only"} if root is not None else {}
+
+
 def run_readfile(body: str, lab_id: int | None = None) -> dict:
     """Read a file from the lab's configured repository.
 

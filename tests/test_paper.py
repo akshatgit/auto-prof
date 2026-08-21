@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from autoprof import paper  # noqa: E402
+from autoprof import paper, tools  # noqa: E402
 from autoprof.backends.base import Backend, BackendResult  # noqa: E402
 from tests.helpers import fresh_db, seed_lab_with_student  # noqa: E402
 
@@ -467,3 +467,29 @@ class CodexSandboxTests(unittest.TestCase):
                 os.environ.get("AUTOPROF_CODEX_SANDBOX", "danger-full-access"),
                 "workspace-write",
             )
+
+
+class EvidenceCwdTests(unittest.TestCase):
+    """Reviewers and authors must look for evidence where it actually is."""
+
+    def test_codex_gets_the_lab_workspace_read_only(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+            os.environ, {"AUTOPROF_REPO_ROOT_9": d}
+        ):
+            opts = tools.evidence_cwd_options("codex", 9)
+        self.assertEqual(opts["cwd"], str(Path(d).resolve()))
+        self.assertEqual(opts["sandbox"], "read-only")
+
+    def test_non_codex_backends_get_nothing(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(
+            os.environ, {"AUTOPROF_REPO_ROOT_9": d}
+        ):
+            self.assertEqual(tools.evidence_cwd_options("claude", 9), {})
+
+    def test_lab_without_a_workspace_gets_nothing(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(tools.evidence_cwd_options("codex", 9), {})
+
+    def test_review_and_response_pass_it_through(self):
+        for module in ("autoprof/paper_review.py", "autoprof/author_response.py"):
+            self.assertIn("evidence_cwd_options", Path(module).read_text(), module)

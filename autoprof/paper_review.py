@@ -17,7 +17,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import callback, collaboration, config, db, jobs, references
+from . import callback, collaboration, config, db, jobs, references, tools
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -127,7 +127,10 @@ def execute_paper_review_job(
         conn, paper["id"], row["review_round"], row["reviewer_index"], lab_dir,
         lab_id=task["lab_id"],
     )
-    result = jobs.run_with_session(conn, job_id, backend, prompt)
+    result = jobs.run_with_session(
+        conn, job_id, backend, prompt,
+        **tools.evidence_cwd_options(backend.name, task["lab_id"]),
+    )
 
     if result.rate_limited:
         jobs.record_rate_limit(
