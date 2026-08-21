@@ -178,6 +178,59 @@ def _execute_one(
         conn.close()
 
 
+# Job kinds whose handler lets an agentic backend write the lab workspace.
+# Two of these running at once in one lab means two agents editing one
+# checkout, and `git add -A` at the end of each sweeps up whatever the other
+# had half-written.
+WORKSPACE_WRITER_KINDS = frozenset(
+    {"student_work", "student_revise_paper", "author_response"}
+)
+
+
+def _serialize_workspace_writers(conn: sqlite3.Connection, candidates: list) -> list:
+    """At most one workspace-writing job per lab, and none while one runs.
+
+    Lab 9 ran tasks 34, 35 and 36 concurrently against a single checkout.
+    The result: 139 files belonging to two tasks landed in a third task's
+    tree, a paper-revision commit bundled another student's unfinished
+    work, and the ecosystem-exposure student modified the cache-soundness
+    reducer that a different task's paper depends on. Provenance is the
+    thing reviewers attack hardest, and this was quietly destroying it.
+
+    Serialising rather than isolating is deliberate: tasks 35 and 36 are
+    specified in terms of task 34's tool, so they must share the checkout.
+    They just must not write it at the same time.
+    """
+    busy = {
+        row["lab_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT t.lab_id AS lab_id FROM jobs j "
+            "JOIN tasks t ON t.id = j.target_id "
+            "WHERE j.status = 'running' AND j.target_type = 'task' "
+            "AND j.kind IN ({})".format(
+                ",".join("?" * len(WORKSPACE_WRITER_KINDS))
+            ),
+            tuple(sorted(WORKSPACE_WRITER_KINDS)),
+        )
+        if row["lab_id"] is not None
+    }
+
+    kept = []
+    for candidate in candidates:
+        if candidate["kind"] not in WORKSPACE_WRITER_KINDS:
+            kept.append(candidate)
+            continue
+        lab_id = _job_lab_id(conn, candidate)
+        if lab_id is None:
+            kept.append(candidate)
+            continue
+        if lab_id in busy:
+            continue          # another writer holds this lab's workspace
+        busy.add(lab_id)      # and this one now claims it for the tick
+        kept.append(candidate)
+    return kept
+
+
 def dispatch_pending_jobs(
     conn: sqlite3.Connection,
     registry,
@@ -216,6 +269,7 @@ def dispatch_pending_jobs(
         "ORDER BY attempts, created_at LIMIT ?",
         (max(budget_cap * 4, budget_cap),),
     ).fetchall()
+    candidate_rows = _serialize_workspace_writers(conn, candidate_rows)
 
     if workers > 1:
         if db_path is None:

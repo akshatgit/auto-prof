@@ -10,6 +10,26 @@ from autoprof.runner import PromptSpec
 from tests.helpers import fresh_db, seed_lab_with_student
 
 
+def _task_in_new_lab(conn, ids):
+    """A task in its own lab.
+
+    One lab admits only one workspace-writing job at a time, so a test
+    about dispatch volume needs its jobs spread across labs -- otherwise it
+    is measuring the workspace guard, not the budget.
+    """
+    prof = conn.execute(
+        "SELECT professor_id FROM labs WHERE id = ?", (ids["lab_id"],)
+    ).fetchone()["professor_id"]
+    lab_id = conn.execute(
+        "INSERT INTO labs (professor_id, root_problem, status) VALUES (?, 'r', 'active')",
+        (prof,),
+    ).lastrowid
+    return conn.execute(
+        "INSERT INTO tasks (lab_id, title, brief_path, direction, end_criteria, status) "
+        "VALUES (?, 't', 'b.md', 'open', 'x', 'in_progress')", (lab_id,),
+    ).lastrowid
+
+
 def _insert_pending_job(conn, task_id, kind="student_work"):
     cur = conn.execute(
         "INSERT INTO jobs (kind, target_type, target_id, status) VALUES (?, 'task', ?, 'pending')",
@@ -97,7 +117,7 @@ class DispatchPendingJobsTests(unittest.TestCase):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         for _ in range(5):
-            _insert_pending_job(conn, ids["task_id"])
+            _insert_pending_job(conn, _task_in_new_lab(conn, ids))
         backend = AlwaysOkBackend()
 
         with tempfile.TemporaryDirectory() as d:
@@ -420,7 +440,7 @@ class HandlerCrashTests(unittest.TestCase):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
         first = self._job(conn, ids)
-        second = self._job(conn, ids)
+        second = self._job(conn, {**ids, "task_id": _task_in_new_lab(conn, ids)})
         seen = []
 
         def handler(conn_, job, backend, lab_dir):
@@ -506,11 +526,29 @@ class ConcurrentDispatchTests(unittest.TestCase):
         conn = db_module.connect(path)
         db_module.ensure_initialized(conn)
         ids = seed_lab_with_student(conn)
-        for _ in range(n_jobs):
+        # One lab now admits only one workspace-writing job at a time, so
+        # give each job its own lab: this suite is about the lease protocol
+        # under concurrency, and needs jobs that may genuinely run at once.
+        prof = conn.execute(
+            "SELECT professor_id FROM labs WHERE id = ?", (ids["lab_id"],)
+        ).fetchone()["professor_id"]
+        for i in range(n_jobs):
+            if i == 0:
+                task_id = ids["task_id"]
+            else:
+                lab_id = conn.execute(
+                    "INSERT INTO labs (professor_id, root_problem, status) "
+                    "VALUES (?, 'r', 'active')", (prof,),
+                ).lastrowid
+                task_id = conn.execute(
+                    "INSERT INTO tasks (lab_id, title, brief_path, direction, "
+                    "end_criteria, status) VALUES (?, 't', 'b.md', 'open', 'x', "
+                    "'in_progress')", (lab_id,),
+                ).lastrowid
             conn.execute(
                 "INSERT INTO jobs (kind, target_type, target_id, status) "
                 "VALUES ('student_work', 'task', ?, 'pending')",
-                (ids["task_id"],),
+                (task_id,),
             )
         conn.commit()
         return path, conn
@@ -620,3 +658,77 @@ class ConcurrentDispatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceSerializationTests(unittest.TestCase):
+    """One agent at a time may write a lab's shared checkout."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.lab_id = self.ids["lab_id"]
+        self.task_a = self.ids["task_id"]
+        cur = self.conn.execute(
+            "INSERT INTO tasks (lab_id, title, brief_path, direction, end_criteria, status) "
+            "VALUES (?, 'second', 'b.md', 'open', 'x', 'in_progress')", (self.lab_id,)
+        )
+        self.task_b = cur.lastrowid
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _job(self, kind, task_id, status="pending"):
+        cur = self.conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) VALUES (?, 'task', ?, ?)",
+            (kind, task_id, status),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def _candidates(self):
+        return self.conn.execute(
+            "SELECT id, kind, reviewer_index, target_type, target_id FROM jobs "
+            "WHERE status='pending' ORDER BY id"
+        ).fetchall()
+
+    def _kept_ids(self):
+        return [r["id"] for r in
+                daemon._serialize_workspace_writers(self.conn, self._candidates())]
+
+    def test_only_one_writer_per_lab_per_tick(self):
+        a = self._job("student_work", self.task_a)
+        self._job("student_work", self.task_b)
+        self.assertEqual(self._kept_ids(), [a])
+
+    def test_no_writer_dispatched_while_one_runs(self):
+        self._job("student_work", self.task_a, status="running")
+        self._job("student_work", self.task_b)
+        self.assertEqual(self._kept_ids(), [])
+
+    def test_non_writers_are_never_held_back(self):
+        self._job("student_work", self.task_a, status="running")
+        sup = self._job("professor_supervision", self.task_b)
+        self.assertEqual(self._kept_ids(), [sup])
+
+    def test_revision_and_research_contend_for_the_same_slot(self):
+        a = self._job("student_revise_paper", self.task_a)
+        self._job("student_work", self.task_b)
+        self.assertEqual(self._kept_ids(), [a])
+
+    def test_other_labs_are_unaffected(self):
+        prof = self.conn.execute(
+            "SELECT professor_id FROM labs WHERE id = ?", (self.lab_id,)
+        ).fetchone()["professor_id"]
+        other = self.conn.execute(
+            "INSERT INTO labs (professor_id, root_problem, status) VALUES (?, 'r', 'active')",
+            (prof,),
+        ).lastrowid
+        other_task = self.conn.execute(
+            "INSERT INTO tasks (lab_id, title, brief_path, direction, end_criteria, status) "
+            "VALUES (?, 't', 'b.md', 'open', 'x', 'in_progress')", (other,)
+        ).lastrowid
+        self.conn.commit()
+        a = self._job("student_work", self.task_a)
+        b = self._job("student_work", other_task)
+        self.assertEqual(self._kept_ids(), [a, b])
