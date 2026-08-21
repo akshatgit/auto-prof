@@ -84,12 +84,17 @@ max_collaboration_rounds = 6
 max_tasks_per_decomposition = 3
 
 [labs.9]
-# Paper 55 exposed a measured generation-quality regression: six
-# MiniMax-authored papers received 167 reviews without one strong_accept.
-# Re-run this lab with Codex authors and a three-family panel; Codex has
-# one vote but never a majority over a paper from its own family.
+# Lab 9 authors with Codex (gpt-5.5 -- the global default refuses this
+# lab's build-cache prompts as a cybersecurity risk) and reviews with a
+# claude/codex/claude panel, so Codex never holds a majority over a paper
+# from its own family.
+#
+# These values are the intended defaults. The live deployment currently
+# overrides generation_backend, review_panel and max_supervision_rounds
+# through AUTOPROF_*_9 environment variables, which take precedence; the
+# running configuration is authoritative over this table.
 generation_backend = "codex"
-review_panel = ["codex", "ollama_cloud_review", "ollama_cloud"]
-max_supervision_rounds = 30
+review_panel = ["claude", "codex", "claude"]
+max_supervision_rounds = 0   # 0 = unlimited; a round cap is not evidence
 max_review_exchanges = 2
 max_paper_revision_rounds = 1
