@@ -367,3 +367,64 @@ class HistoryScopingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PriorReviewFeedbackTests(unittest.TestCase):
+    """A professor must see why the last paper was rejected."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _add_paper_with_reviews(self, verdicts, rationale="the reducer reduces nothing"):
+        cur = self.conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'T', 'rejected', 1)",
+            (self.ids["task_id"], self.ids["student_id"]),
+        )
+        paper_id = cur.lastrowid
+        for i, verdict in enumerate(verdicts, start=1):
+            rel = f"reviews/{i}.md"
+            (self.lab_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.lab_dir / rel).write_text(f"{rationale} ({i})")
+            self.conn.execute(
+                "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, "
+                "verdict, rationale_path, reviewer_backend) "
+                "VALUES ('paper', ?, 1, ?, ?, ?, 'claude')",
+                (paper_id, i, verdict, rel),
+            )
+        self.conn.commit()
+        return paper_id
+
+    def test_no_paper_yields_nothing(self):
+        self.assertEqual(
+            supervision.render_prior_reviews(self.conn, self.ids["task_id"], self.lab_dir), ""
+        )
+
+    def test_verdicts_and_rationales_are_shown(self):
+        self._add_paper_with_reviews(["reject", "strong_accept", "reject"])
+        out = supervision.render_prior_reviews(self.conn, self.ids["task_id"], self.lab_dir)
+        self.assertIn("reject", out)
+        self.assertIn("strong_accept", out)
+        self.assertIn("the reducer reduces nothing", out)
+        self.assertIn("must actually", out)
+
+    def test_reviewer_family_is_named(self):
+        self._add_paper_with_reviews(["reject"])
+        out = supervision.render_prior_reviews(self.conn, self.ids["task_id"], self.lab_dir)
+        self.assertIn("claude", out)
+
+    def test_missing_rationale_file_does_not_raise(self):
+        paper_id = self._add_paper_with_reviews(["reject"])
+        (self.lab_dir / "reviews" / "1.md").unlink()
+        out = supervision.render_prior_reviews(self.conn, self.ids["task_id"], self.lab_dir)
+        self.assertIn("rationale unavailable", out)
+
+    def test_prompt_template_has_the_slot(self):
+        self.assertIn("{prior_reviews}", supervision.SUPERVISION_PROMPT_TEMPLATE)

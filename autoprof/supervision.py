@@ -66,6 +66,8 @@ Your student's current working memory -- everything they have established so far
 
 {ledger}
 
+{prior_reviews}
+
 Read their work critically, as the person responsible for it. You are NOT a peer reviewer \
 writing a verdict on a finished paper; you are the supervisor deciding what happens next. \
 Independent reviewers will later check every step and reject the paper if any step fails, so \
@@ -110,6 +112,58 @@ where "assessment" is your honest read of where the work stands, and "guidance" 
 student should do next (for "ready", what they must be careful to include when writing up; for \
 "abandon", why stopping is right).
 """
+
+
+def render_prior_reviews(
+    conn: sqlite3.Connection, task_id: int, lab_dir: Path, excerpt: int = 1800
+) -> str:
+    """What independent reviewers said about this task's last paper.
+
+    Supervision could not see this. A professor decided `ready`, the paper
+    was rejected on a specific defect, the task came back for research,
+    and the next meeting -- knowing only that a paper existed -- declared
+    `ready` again against the same unfixed defect. Task 34 did that four
+    times in a row on the same reducer bug.
+    """
+    paper = conn.execute(
+        "SELECT * FROM papers WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+    ).fetchone()
+    if paper is None:
+        return ""
+    rows = conn.execute(
+        "SELECT * FROM reviews WHERE target_type='paper' AND target_id = ? "
+        "AND review_round = ? ORDER BY reviewer_index",
+        (paper["id"], paper["review_round"]),
+    ).fetchall()
+    if not rows:
+        return ""
+
+    parts = [
+        f"Independent reviewers judged this task's most recent paper (#{paper['id']}, "
+        f"round {paper['review_round']}, now {paper['status']}). Their verdicts and "
+        "reasoning follow. These are the objections the next submission must actually "
+        "answer -- a defect named here and left unfixed will be found again."
+    ]
+    for row in rows:
+        text = ""
+        try:
+            target = (Path(lab_dir) / row["rationale_path"]).resolve()
+            if target.is_file():
+                text = target.read_text(errors="replace")[:excerpt]
+        except OSError:
+            text = ""
+        try:
+            backend = row["reviewer_backend"]
+        except (IndexError, KeyError):
+            backend = None
+        label = f"reviewer #{row['reviewer_index']}"
+        if backend:
+            label += f" ({backend})"
+        parts.append(
+            f"<review reviewer=\"{label}\" verdict=\"{row['verdict']}\">\n"
+            f"{text or '(rationale unavailable)'}\n</review>"
+        )
+    return "<prior_reviews>\n" + "\n\n".join(parts) + "\n</prior_reviews>"
 
 
 class SupervisionError(RuntimeError):
@@ -266,6 +320,7 @@ def execute_professor_supervision_job(
             history=render_history(conn, task["id"], lab_dir, student["id"]),
             memory=memory,
             ledger=assumptions.render(conn, task['id'], for_professor=True),
+            prior_reviews=render_prior_reviews(conn, task["id"], lab_dir),
         ),
     )
 
