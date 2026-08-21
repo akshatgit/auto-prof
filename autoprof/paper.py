@@ -13,6 +13,7 @@ same failure, and collapsing them would mean a formatting failure throws
 away the research work that preceded it.
 """
 
+import os
 import re
 import sqlite3
 import uuid
@@ -318,13 +319,27 @@ def execute_student_work_job(
             # Give research jobs write access only to the configured lab
             # workspace. Supervision, paper review, and every other Codex
             # call retain the backend's read-only default.
-            backend_opts = {"sandbox": "workspace-write", "cwd": str(workspace)}
+            # `workspace-write` also severs the Docker socket, which is not
+            # a detail for a lab whose end criteria require real container
+            # builds: task 34 spent 57 supervision rounds unable to satisfy
+            # criterion (e) while reporting "local Docker permission failed",
+            # and the same `docker info` succeeds outside the sandbox. A lab
+            # that studies an executable system needs the system.
+            sandbox = os.environ.get("AUTOPROF_CODEX_SANDBOX", "danger-full-access")
+            backend_opts = {"sandbox": sandbox, "cwd": str(workspace)}
             work_prompt += (
                 "\n\nCodex workspace note: edit and test the repository directly, but do not "
-                "attempt to write `.git` metadata; that mount is read-only inside your "
-                "sandbox. Report the exact files changed and test results. The research "
-                "orchestrator will preserve each verified checkpoint outside the sandbox."
+                "attempt to write `.git` metadata. Report the exact files changed and test "
+                "results. The research orchestrator will preserve each verified checkpoint "
+                "outside the sandbox."
             )
+            if sandbox == "danger-full-access":
+                work_prompt += (
+                    " You have full host access, including the Docker daemon and the "
+                    "network. If your task needs real builds, run them -- an execution "
+                    "result you actually produced outweighs any amount of argument about "
+                    "what a build would show."
+                )
     result = jobs.run_with_session(conn, job_id, backend, work_prompt, **backend_opts)
 
     if result.rate_limited:
