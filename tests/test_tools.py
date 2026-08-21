@@ -35,6 +35,54 @@ class ParseToolCallsTests(unittest.TestCase):
         text = "```tool:verify\nprint(1)\n```\n" * 10
         self.assertEqual(len(tools.parse_tool_calls(text)), tools.MAX_TOOL_CALLS_PER_ROUND)
 
+    def test_accepts_xml_transport_used_by_compatible_backends(self):
+        text = (
+            "<tool:readfile><path>cacheprobe/canonicalize.py</path></tool:readfile>\n"
+            "then test it\n"
+            "```tool:experiment\n{\"command\":[\"./run_tests.sh\"]}\n```"
+        )
+        self.assertEqual(
+            tools.parse_tool_calls(text),
+            [
+                ("readfile", "cacheprobe/canonicalize.py"),
+                ("experiment", '{"command":["./run_tests.sh"]}\n'),
+            ],
+        )
+
+    def test_xml_closing_tag_must_match_the_opening_tool(self):
+        text = "<tool:readfile>safe.txt</tool:experiment>"
+        self.assertEqual(tools.parse_tool_calls(text), [])
+
+    def test_accepts_gateway_wrapper_only_when_it_closes_the_response(self):
+        text = (
+            "I will patch it.\n```tool:apply_patch\n--- a/a\n+++ b/a\n"
+            "</tool_calls>"
+        )
+        self.assertEqual(
+            tools.parse_tool_calls(text),
+            [("apply_patch", "--- a/a\n+++ b/a")],
+        )
+        self.assertEqual(tools.parse_tool_calls(text + " trailing prose"), [])
+
+    def test_detects_apparent_but_unparseable_tool_syntax(self):
+        self.assertTrue(tools.has_unparsed_tool_syntax("```tool:readfile\na.txt"))
+        self.assertFalse(
+            tools.has_unparsed_tool_syntax("<tool:readfile>a.txt</tool:readfile>")
+        )
+
+    def test_unwraps_single_argument_xml_but_not_arbitrary_nested_content(self):
+        self.assertEqual(
+            tools.parse_tool_calls(
+                "<tool:readfile><path>cacheprobe/runner.py</path></tool:readfile>"
+            ),
+            [("readfile", "cacheprobe/runner.py")],
+        )
+        body = "<root><path>part-of-payload</path></root>"
+        self.assertEqual(
+            tools.parse_tool_calls(f"<tool:verify>{body}</tool:verify>"),
+            [("verify", body)],
+        )
+
 
 class VerifierTests(unittest.TestCase):
     def test_captures_printed_output(self):
@@ -703,3 +751,85 @@ class VerifierIsolationTests(unittest.TestCase):
                 tools.run_record("labs", db_path=tools._conn_db_path(conn))["status"], "ok"
             )
             conn.close()
+
+
+class TaskHomeShellTests(unittest.TestCase):
+    """`shell` gives one task a private, persistent home with a real shell."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+        patcher = mock.patch.dict(
+            os.environ, {tools.TASK_HOME_LABS_ENV + "_9": "9"}, clear=False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, body, lab_id=9, task_id=34):
+        return tools.run_shell(body, lab_id=lab_id, task_id=task_id, lab_dir=self.lab_dir)
+
+    def test_disabled_lab_is_refused(self):
+        result = self._run("echo hi", lab_id=7)
+        self.assertEqual(result["status"], "error")
+        self.assertIn(tools.TASK_HOME_LABS_ENV, result["output"])
+
+    def test_runs_a_script_in_the_task_home(self):
+        result = self._run("pwd && echo marker")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("marker", result["output"])
+        self.assertIn("tasks/34/home", result["output"])
+
+    def test_filesystem_persists_between_calls(self):
+        self.assertEqual(self._run("mkdir -p sub && echo kept > sub/f")["status"], "ok")
+        second = self._run("cat sub/f")
+        self.assertEqual(second["status"], "ok")
+        self.assertIn("kept", second["output"])
+
+    def test_nonzero_exit_is_an_error_with_output(self):
+        result = self._run("echo before; exit 3")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("exit=3", result["output"])
+        self.assertIn("before", result["output"])
+
+    def test_artifacts_are_listed_back(self):
+        result = self._run("printf 12345 > artifacts/result.json")
+        self.assertIn("artifacts/result.json", result["output"])
+        self.assertIn("5 bytes", result["output"])
+
+    def test_home_is_redirected_into_the_task_tree(self):
+        # Otherwise git and docker write per-user state to the daemon's own
+        # home, which may be read-only to the research process.
+        result = self._run("echo $HOME; echo $TMPDIR")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("tasks/34/home", result["output"])
+        self.assertIn("tasks/34/home/tmp", result["output"])
+
+    def test_daemon_secrets_are_not_visible(self):
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOPROF_API_TOKEN": "leak-me", "SOME_API_KEY": "leak-too"},
+            clear=False,
+        ):
+            result = self._run("env")
+        self.assertNotIn("leak-me", result["output"])
+        self.assertNotIn("leak-too", result["output"])
+
+    def test_json_form_with_timeout_is_accepted(self):
+        result = self._run('{"script": "echo json-form", "timeout": 30}')
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("json-form", result["output"])
+
+    def test_timeout_is_reported_as_timeout(self):
+        result = self._run('{"script": "sleep 5", "timeout": 1}')
+        self.assertEqual(result["status"], "timeout")
+
+    def test_empty_script_is_refused(self):
+        self.assertEqual(self._run("   ")["status"], "error")
+
+    def test_shell_is_a_parseable_tool_name(self):
+        calls = tools.parse_tool_calls("```tool:shell\necho hi\n```")
+        self.assertEqual(calls, [("shell", "echo hi\n")])
+
+    def test_documented(self):
+        self.assertIn("**shell**", tools.render_tool_docs())

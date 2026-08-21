@@ -85,11 +85,7 @@ def execute_author_response_job(
     request_file = lab_dir / exchange["request_path"]
 
     prompt = RESPONSE_PROMPT_TEMPLATE.format(
-        tool_docs=tools.TOOL_DOCS.format(
-            timeout=tools.VERIFY_TIMEOUT_SECONDS,
-            max_calls=tools.MAX_TOOL_CALLS_PER_ROUND,
-            max_series=len(tools.SERIES_COLOURS),
-        ),
+        tool_docs=tools.render_tool_docs(),
         request=request_file.read_text(errors="replace") if request_file.exists() else "(missing)",
         paper=paper_file.read_text(errors="replace"),
     )

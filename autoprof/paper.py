@@ -45,6 +45,11 @@ _FENCE_RE = re.compile(r"^```(?:html)?\s*(.*?)\s*```$", re.DOTALL)
 
 WORK_PROMPT_TEMPLATE = """You are a PhD student in a research lab. You are working on one task.
 
+Safety and authorization scope: this is defensive software-quality research performed only on
+the lab's own isolated local containers and checked-in test fixtures. Do not access third-party
+systems, credentials, production services, or unrelated networks. The goal is to verify build
+correctness and regression boundaries, not to exploit, persist in, or disrupt any system.
+
 Your lab's root problem:
 <root_problem>
 {root_problem}
@@ -300,15 +305,27 @@ def execute_student_work_job(
             memory=memory,
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
             corpus=ingest.render_corpus(conn, lab["id"], lab_dir),
-            tool_docs=tools.TOOL_DOCS.format(
-                timeout=tools.VERIFY_TIMEOUT_SECONDS,
-                max_calls=tools.MAX_TOOL_CALLS_PER_ROUND,
-                max_series=len(tools.SERIES_COLOURS),
-            ),
+            tool_docs=tools.render_tool_docs(),
             assumption_docs=assumptions.ASSUMPTION_DOCS,
             ledger=assumptions.render(conn, task["id"]),
     )
-    result = jobs.run_with_session(conn, job_id, backend, work_prompt)
+    backend_opts = {}
+    if backend.name == "codex":
+        workspace = tools._repo_root(lab["id"])
+        if workspace is not None:
+            # Codex is an agentic CLI: it executes its own tool calls rather
+            # than returning our fenced tool syntax for parse_tool_calls().
+            # Give research jobs write access only to the configured lab
+            # workspace. Supervision, paper review, and every other Codex
+            # call retain the backend's read-only default.
+            backend_opts = {"sandbox": "workspace-write", "cwd": str(workspace)}
+            work_prompt += (
+                "\n\nCodex workspace note: edit and test the repository directly, but do not "
+                "attempt to write `.git` metadata; that mount is read-only inside your "
+                "sandbox. Report the exact files changed and test results. The research "
+                "orchestrator will preserve each verified checkpoint outside the sandbox."
+            )
+    result = jobs.run_with_session(conn, job_id, backend, work_prompt, **backend_opts)
 
     if result.rate_limited:
         jobs.record_rate_limit(
@@ -334,12 +351,22 @@ def execute_student_work_job(
             student_id=student["id"],
             lab_dir=lab_dir,
         )
-        prompt_so_far = (
-            f"{prompt_so_far}\n\n--- your previous response ---\n{result.text}\n\n"
+        delta = (
+            f"--- your previous response ---\n{result.text}\n\n"
             f"{tool_results}\n\nNow produce your complete updated working memory, taking the "
             "tool results into account. You may call tools again if you genuinely need to."
         )
-        follow_up = jobs.run_with_session(conn, job_id, backend, prompt_so_far)
+        if result.session_id:
+            # A resumable backend already retains the original prompt.
+            # Re-sending it on every tool turn duplicated tens of thousands
+            # of tokens and eventually buried the actual tool result.
+            follow_prompt = delta
+        else:
+            prompt_so_far = f"{prompt_so_far}\n\n{delta}"
+            follow_prompt = prompt_so_far
+        follow_up = jobs.run_with_session(
+            conn, job_id, backend, follow_prompt, **backend_opts
+        )
         if follow_up.rate_limited:
             jobs.record_rate_limit(conn, job_id, lease_id, follow_up.retry_after_seconds)
             return "rate_limited"
@@ -347,6 +374,19 @@ def execute_student_work_job(
             # Keep the pre-tool response rather than losing the work.
             break
         result = follow_up
+
+    # A model can spend the final permitted round on a tool and return one
+    # more valid call. That call has not run. Never turn it into prose memory
+    # merely because the loop counter expired; fail safely so a retry can
+    # continue from the checkpoint and already-committed tool effects.
+    if tools.parse_tool_calls(result.text):
+        return jobs.fail_job(
+            conn,
+            job_id,
+            lease_id,
+            "tool round limit reached with an unexecuted tool call; refusing to store it as "
+            "student memory",
+        )
 
     # Belt and braces alongside the backend's own empty-output check:
     # memory.md is overwritten wholesale, so writing an empty result would
@@ -356,6 +396,14 @@ def execute_student_work_job(
     if not result.text.strip():
         return jobs.fail_job(
             conn, job_id, lease_id, "backend returned empty work output; refusing to erase memory"
+        )
+    if tools.has_unparsed_tool_syntax(result.text):
+        return jobs.fail_job(
+            conn,
+            job_id,
+            lease_id,
+            "backend returned malformed tool syntax; refusing to store unexecuted tool requests "
+            "as student memory",
         )
 
     # §7: snapshot before overwriting. memory.md is replaced wholesale
@@ -576,6 +624,7 @@ def execute_student_revise_paper_job(
             conn, job_id, lease_id, f"revision is not an HTML document: {html[:300]}"
         )
 
+    checkpoint_artifact(lab_dir / paper["path"])
     write_artifact(lab_dir / paper["path"], html)
     conn.execute(
         "UPDATE papers SET title = ? WHERE id = ?",

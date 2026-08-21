@@ -57,9 +57,33 @@ MAX_TOOL_CALLS_PER_ROUND = 4
 SERIES_COLOURS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
 SERIES_DASHES = ("", "6 3", "2 3", "8 3 2 3")
 
+# One source of truth for the tool names the parsers accept.  Three regexes
+# used to repeat this alternation, so adding a tool meant editing it three
+# times and silently half-registering the tool if you missed one.
+TOOL_NAMES = (
+    "verify", "visualize", "readfile", "propose_patch", "apply_patch",
+    "fetch", "experiment", "record", "shell",
+)
+_NAMES = "|".join(TOOL_NAMES)
+
 _TOOL_BLOCK_RE = re.compile(
-    r"```tool:(verify|visualize|readfile|propose_patch|apply_patch|fetch|experiment|record)"
+    rf"```tool:({_NAMES})"
     r"\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
+)
+_TOOL_XML_RE = re.compile(
+    rf"<tool:(?P<name>{_NAMES})>"
+    r"\s*(?P<body>.*?)\s*</tool:(?P=name)>",
+    re.DOTALL | re.IGNORECASE,
+)
+_TOOL_TRAILING_WRAPPER_RE = re.compile(
+    rf"```tool:(?P<name>{_NAMES})"
+    r"\s*\n(?P<body>.*?)\s*</tool_calls>\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+_TOOL_SINGLE_ARGUMENT_RE = re.compile(
+    r"^\s*<(?P<key>path|url|body|patch|code|spec|json|input)>"
+    r"\s*(?P<value>.*?)\s*</(?P=key)>\s*$",
+    re.DOTALL | re.IGNORECASE,
 )
 
 # Where `readfile` and `propose_patch` are allowed to look. Set per lab by
@@ -91,6 +115,18 @@ EXPERIMENT_TIMEOUT = 3600
 WORKSPACE_EXEC_LABS_ENV = "AUTOPROF_WORKSPACE_EXEC_LABS"
 WORKSPACE_EXEC_TIMEOUT = 900
 WORKSPACE_EXEC_OUTPUT_LIMIT = 40_000
+
+# A task's own home directory.  `experiment` deliberately runs only checked-in
+# scripts from the shared lab workspace, which is right for the artefact a
+# paper cites but wrong for getting there: a student cannot clone an upstream
+# repository, bisect it, build a toolchain, or keep a scratch tree that is
+# theirs alone.  `shell` gives each task a private home under
+# lab/<lab>/tasks/<task>/home with a real shell in it.  Opt-in per lab, same
+# as workspace execution.
+TASK_HOME_LABS_ENV = "AUTOPROF_TASK_HOME_LABS"
+TASK_HOME_TIMEOUT = 1800
+TASK_HOME_OUTPUT_LIMIT = 40_000
+TASK_HOME_ARTIFACTS = "artifacts"
 
 TOOL_DOCS = """You have these tools. To use one, emit a fenced block in your response; it will be \
 run and the result given back to you before you finalise your work.
@@ -149,6 +185,28 @@ reviewable, then run it:
 ```
 
 Design experiments properly: vary ONE thing between arms, state the arms before you run them, and run a control. Do not report a comparison you did not actually run -- reviewers check.
+
+**shell** -- YOUR OWN HOME DIRECTORY, with a real shell in it, when your lab is permitted one. \
+This is where you do the work that `experiment` cannot express: clone the system you are studying, \
+check out an affected version and a fixed version, build them, run them, diff what they produce. \
+It has network access and it persists across rounds -- what you build this round is still there \
+next round, and is still there for whoever inherits this task after you.
+
+```tool:shell
+git clone --depth 50 https://github.com/moby/buildkit.git
+cd buildkit && git log --oneline -5
+```
+
+You get back the exit status and the combined output ({shell_timeout}s limit). `cd` and shell \
+variables last only for the one call; the FILESYSTEM lasts. Write anything a paper cites into \
+`artifacts/` -- its contents are listed back to you after every call, so a reviewer can tie each \
+artefact to the run that produced it.
+
+Two things this does not excuse. A result you obtained here is only evidence if the commands that \
+produced it are recorded, so keep a script in the home rather than retyping ad-hoc pipelines. And \
+code that a paper's claims rest on belongs in the lab workspace via `apply_patch`, where it is \
+tested and committed -- the home is where you find things out, the workspace is where you commit \
+what you found.
 
 **readfile** -- read one file from the repository this lab studies, path relative to its root. Only available when the lab has a repository configured.
 
@@ -521,6 +579,134 @@ def run_workspace_experiment(spec: dict, lab_id: int | None) -> dict:
     return {
         "status": status,
         "output": f"[exit={proc.returncode} cwd={root}]\n{output}".rstrip(),
+    }
+
+
+def task_home(lab_dir, lab_id: int, task_id: int) -> Path:
+    """Return (creating on first use) the private home directory of one task.
+
+    Lives beside the task's supervision record so everything belonging to a
+    line of work is under one path and survives the student being replaced --
+    a new student inherits the tree their predecessor built, which is the
+    point: continuity of the artefact, not of the author.
+    """
+    home = Path(lab_dir) / str(lab_id) / "tasks" / str(task_id) / "home"
+    if not home.exists():
+        (home / TASK_HOME_ARTIFACTS).mkdir(parents=True, exist_ok=True)
+        (home / "tmp").mkdir(parents=True, exist_ok=True)
+        (home / "README.md").write_text(
+            f"# Task {task_id} home\n\n"
+            "This directory is yours. Clone repositories into it, write scripts, build\n"
+            "toolchains, run experiments. It persists across rounds and across students.\n\n"
+            f"Put anything a paper cites in `{TASK_HOME_ARTIFACTS}/` -- files there are\n"
+            "listed back to you after every `shell` run, so a reviewer can see exactly\n"
+            "which run produced which artefact.\n"
+        )
+    return home
+
+
+def _artifact_manifest(home: Path) -> str:
+    """One line per artefact: size and mtime, newest last."""
+    root = home / TASK_HOME_ARTIFACTS
+    if not root.is_dir():
+        return ""
+    rows = []
+    for f in sorted(root.rglob("*")):
+        if f.is_file():
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            rows.append((st.st_mtime, f.relative_to(home).as_posix(), st.st_size))
+    if not rows:
+        return ""
+    rows.sort()
+    listing = "\n".join(f"  {rel}  ({size} bytes)" for _, rel, size in rows[-40:])
+    more = f"\n  ... {len(rows) - 40} older artefact(s) not shown" if len(rows) > 40 else ""
+    return f"\n--- artefacts in {TASK_HOME_ARTIFACTS}/ ---\n{listing}{more}"
+
+
+def run_shell(body: str, *, lab_id: int | None, task_id: int | None, lab_dir) -> dict:
+    """Run a shell script in this task's own home directory.
+
+    Unlike `experiment`, this is a real shell with network access: it exists so
+    a student can `git clone` the system under study, check out two versions,
+    build them, and compare -- work that cannot be expressed as "run a
+    checked-in Python file". It is confined to the task home by cwd and by
+    HOME/TMPDIR pointing there, which also means git and docker write their
+    per-user state somewhere writable instead of failing against a read-only
+    home.
+    """
+    import os
+
+    allowed = {
+        x.strip()
+        for x in (_scoped_env(TASK_HOME_LABS_ENV, lab_id) or "").split(",")
+        if x.strip()
+    }
+    if lab_id is None or (str(lab_id) not in allowed and "*" not in allowed):
+        return {
+            "status": "error",
+            "output": "(this lab has no task home; configure "
+                      f"{TASK_HOME_LABS_ENV}_{lab_id})",
+        }
+    if task_id is None or lab_dir is None:
+        return {"status": "error", "output": "(no task context for a task home)"}
+
+    script = body
+    timeout = TASK_HOME_TIMEOUT
+    stripped = body.strip()
+    # Accept either a bare script or {"script": ..., "timeout": N}; models
+    # reach for the JSON form by analogy with `experiment`, and refusing it
+    # costs a wasted round for no gain.
+    if stripped.startswith("{"):
+        try:
+            spec = json.loads(stripped)
+        except ValueError:
+            spec = None
+        if isinstance(spec, dict) and isinstance(spec.get("script") or spec.get("command"), str):
+            script = spec.get("script") or spec["command"]
+            try:
+                timeout = int(spec.get("timeout", TASK_HOME_TIMEOUT))
+            except (TypeError, ValueError):
+                return {"status": "error", "output": "(timeout must be an integer)"}
+    if not script.strip():
+        return {"status": "error", "output": "(give a shell script to run)"}
+    timeout = max(1, min(timeout, TASK_HOME_TIMEOUT))
+
+    home = task_home(lab_dir, lab_id, task_id)
+
+    # Same rule as workspace execution: research code never sees daemon or
+    # provider credentials. HOME and TMPDIR are redirected into the task tree.
+    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "APIKEY")
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AUTOPROF_")
+        and not any(marker in key.upper() for marker in sensitive_markers)
+    }
+    env.update({"HOME": str(home), "TMPDIR": str(home / "tmp"), "PWD": str(home)})
+
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", script], cwd=home, capture_output=True, text=True,
+            timeout=timeout, stdin=subprocess.DEVNULL, env=env,
+        )
+    except subprocess.TimeoutExpired as e:
+        def _txt(x):
+            return x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+        partial = (_txt(e.stdout) + _txt(e.stderr))[-4000:]
+        return {"status": "timeout", "output": f"(shell exceeded {timeout}s)\n{partial}"}
+    except OSError as e:
+        return {"status": "error", "output": f"(could not run shell: {e})"}
+
+    output = ((proc.stdout or "") + (proc.stderr or ""))[:TASK_HOME_OUTPUT_LIMIT]
+    status = "ok" if proc.returncode == 0 else "error"
+    return {
+        "status": status,
+        "output": (
+            f"[exit={proc.returncode} home={home}]\n{output}".rstrip()
+            + _artifact_manifest(home)
+        ),
     }
 
 
@@ -937,12 +1123,52 @@ def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
     }
 
 
+def render_tool_docs() -> str:
+    """TOOL_DOCS with its placeholders filled in.
+
+    Call sites used to repeat the argument list, so adding a documented limit
+    broke every caller that had not been updated.
+    """
+    return TOOL_DOCS.format(
+        timeout=VERIFY_TIMEOUT_SECONDS,
+        max_calls=MAX_TOOL_CALLS_PER_ROUND,
+        max_series=len(SERIES_COLOURS),
+        shell_timeout=TASK_HOME_TIMEOUT,
+    )
+
+
 def parse_tool_calls(text: str) -> list[tuple[str, str]]:
-    """Extract (tool, body) pairs from a model response, capped."""
-    return [
-        (match.group(1).lower(), match.group(2))
-        for match in _TOOL_BLOCK_RE.finditer(text or "")
-    ][:MAX_TOOL_CALLS_PER_ROUND]
+    """Extract capped tool calls in source order.
+
+    Fenced blocks are the documented protocol. Some otherwise compatible
+    backends emit the equivalent ``<tool:name>...</tool:name>`` form. Treat
+    that as transport syntax, not as working memory: failing to recognize it
+    caused four unexecuted read requests to overwrite a student's research
+    record while the job was incorrectly marked done.
+    """
+    matches = []
+    for match in _TOOL_BLOCK_RE.finditer(text or ""):
+        matches.append((match.start(), match.group(1).lower(), match.group(2)))
+    for match in _TOOL_XML_RE.finditer(text or ""):
+        matches.append((match.start(), match.group("name").lower(), match.group("body")))
+    # Some OpenAI-compatible tool gateways replace the final Markdown fence
+    # with their own closing wrapper. Accept it only at end-of-response, so
+    # arbitrary prose cannot terminate a partial patch early.
+    for match in _TOOL_TRAILING_WRAPPER_RE.finditer(text or ""):
+        matches.append((match.start(), match.group("name").lower(), match.group("body")))
+    matches.sort(key=lambda item: item[0])
+    calls = []
+    for _, name, body in matches[:MAX_TOOL_CALLS_PER_ROUND]:
+        wrapped = _TOOL_SINGLE_ARGUMENT_RE.fullmatch(body)
+        calls.append((name, wrapped.group("value") if wrapped else body))
+    return calls
+
+
+def has_unparsed_tool_syntax(text: str) -> bool:
+    """Whether a response looks like a tool request but none was parseable."""
+    lowered = (text or "").lower()
+    apparent = "```tool:" in lowered or "<tool:" in lowered or "</tool_calls>" in lowered
+    return apparent and not parse_tool_calls(text)
 
 
 _ISOLATION_CACHE = {}
@@ -1235,6 +1461,8 @@ def execute_tool_calls(conn, calls, *, lab_id, task_id, student_id, lab_dir) -> 
             result = run_record(body, db_path=_conn_db_path(conn))
         elif tool == "propose_patch":
             result = run_propose_patch(body)
+        elif tool == "shell":
+            result = run_shell(body, lab_id=lab_id, task_id=task_id, lab_dir=lab_dir)
         else:
             result = run_apply_patch(body, lab_id)
 
