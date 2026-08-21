@@ -512,3 +512,23 @@ class EvidenceCwdTests(unittest.TestCase):
     def test_review_and_response_pass_it_through(self):
         for module in ("autoprof/paper_review.py", "autoprof/author_response.py"):
             self.assertIn("evidence_cwd_options", Path(module).read_text(), module)
+
+
+class ReviseWorkspaceAccessTests(unittest.TestCase):
+    """A revision must be able to fix the artifact, not only the prose."""
+
+    def test_revise_passes_writable_workspace_options(self):
+        src = Path("autoprof/paper.py").read_text()
+        start = src.index("def execute_student_revise_paper_job")
+        body = src[start:start + 6000]
+        self.assertIn("evidence_cwd_options", body)
+        self.assertIn("writable=True", body)
+
+    def test_revise_commits_the_workspace(self):
+        src = Path("autoprof/paper.py").read_text()
+        start = src.index("def execute_student_revise_paper_job")
+        self.assertIn("commit_workspace", src[start:start + 8000])
+
+    def test_revise_prompt_tells_the_student_it_may_fix_the_artifact(self):
+        src = Path("autoprof/paper.py").read_text()
+        self.assertIn("fix the artifact and re-run it", src)

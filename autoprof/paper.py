@@ -625,21 +625,37 @@ def execute_student_revise_paper_job(
         body = rationale_file.read_text() if rationale_file.exists() else "(rationale missing)"
         reviews.append(f"--- Reviewer {review['reviewer_index']} ({review['verdict']}) ---\n{body}")
 
-    result = jobs.run_with_session(
-        conn,
-        job_id,
-        backend,
-        REVISE_PROMPT_TEMPLATE.format(
-            root_problem=lab["root_problem"],
-            title=task["title"],
-            direction=task["direction"],
-            end_criteria=task["end_criteria"],
-            memory=memory,
-            reference_bank=references.render_for_prompt(conn),
-            paper=paper_file.read_text(),
-            reviews="\n\n".join(reviews),
-        ),
+    revise_prompt = REVISE_PROMPT_TEMPLATE.format(
+        root_problem=lab["root_problem"],
+        title=task["title"],
+        direction=task["direction"],
+        end_criteria=task["end_criteria"],
+        memory=memory,
+        reference_bank=references.render_for_prompt(conn),
+        paper=paper_file.read_text(),
+        reviews="\n\n".join(reviews),
     )
+
+    # A revision that cannot reach the workspace can only rewrite prose.
+    # Reviewers reject papers for defects in the artifact -- "your reducer
+    # deletes a label, not the state it describes" -- and no amount of
+    # rephrasing answers that. Revising had no cwd at all, so the student
+    # could not read the code it was being asked to fix, let alone run a
+    # build. That is how a paper absorbs objections for eight rounds while
+    # the missing experiment never happens.
+    revise_opts = tools.evidence_cwd_options(backend.name, lab["id"], writable=True)
+    if revise_opts:
+        revise_prompt += (
+            "\n\nYou are in the lab workspace with full host access, including Docker "
+            "and the network. If a reviewer's objection is about the ARTIFACT rather "
+            "than the writing -- a defect in the code, a missing experiment, an "
+            "unvalidated claim -- then fix the artifact and re-run it, and say in the "
+            "revision what you changed and what the new run showed. Rewording a "
+            "sentence to describe a defect more carefully does not remove the defect, "
+            "and the same reviewer will find it again."
+        )
+
+    result = jobs.run_with_session(conn, job_id, backend, revise_prompt, **revise_opts)
 
     if result.rate_limited:
         jobs.record_rate_limit(
@@ -662,6 +678,18 @@ def execute_student_revise_paper_job(
         (extract_title(html, task["title"]), paper["id"]),
     )
     conn.execute("UPDATE students SET status = 'in_review' WHERE id = ?", (student["id"],))
+
+    # A revision may now change the artifact, not only the prose, so the
+    # same versioning rule as a research round applies.
+    commit = tools.commit_workspace(
+        lab["id"], f"paper revision: paper {paper['id']} round {paper['review_round']}"
+    )
+    if commit["status"] == "ok":
+        record_job_event(
+            conn, job_id, "student", student["id"], "workspace_committed",
+            "task", task["id"],
+            metadata={"result": commit["output"], "tests_passed": commit["tests_passed"]},
+        )
 
     from .paper_review import resubmit_paper
 
