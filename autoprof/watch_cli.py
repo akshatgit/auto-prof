@@ -34,7 +34,7 @@ NOTABLE_EVENT_TYPES = {
     "paper_accepted": "a paper was ACCEPTED",
     "lab_review_passed": "a lab passed review and is now active",
     "lab_review_exhausted": (
-        "NEEDS YOU: a lab failed review 4 times and has stopped revising -- "
+        "NEEDS YOU: a lab failed review 8 times and has stopped revising -- "
         "push it through, rewrite the root problem, or drop it"
     ),
     "task_resolved": "the professor closed a task as resolved",

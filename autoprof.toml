@@ -24,6 +24,13 @@
 #
 # AUTOPROF_OLLAMA_MODEL overrides this.
 ollama_model = "minimax-m3"
+# A different family reviews generated work. Keeping this separate from
+# ollama_model avoids having MiniMax judge its own output in reviewer slot 2.
+# AUTOPROF_OLLAMA_REVIEW_MODEL overrides this.
+ollama_review_model = "deepseek-v4-pro"
+# Reviewer slots 1 and 3 remain Codex; slot 2 moves from the rate-limited
+# Claude CLI to the separately configured Ollama Cloud reviewer above.
+review_panel = ["codex", "ollama_cloud_review", "codex"]
 # Seconds before an Ollama call is abandoned. Was a hardcoded 280 that
 # nothing could change, which became a hard ceiling when generation moved
 # to a slower model: the longest jobs -- revising a paper against three
@@ -37,7 +44,7 @@ ollama_timeout = 900
 generation = "ollama_cloud"   # student work, professor decompose/callback, memory compaction
 review = "codex"              # independent paper/defense review (docs/DESIGN.md §4)
 # Generation deliberately stays off codex even though codex is stronger:
-# the review panel is codex+claude, so codex-written papers would be
+# the review panel is codex+DeepSeek, so codex-written papers would be
 # judged two-thirds by their own model family. Reviewer independence
 # across families is the load-bearing assumption (see review_panel below).
 
@@ -68,7 +75,21 @@ max_rejected_papers = 5
 # has. Lets a reviewer say "run this and show me" rather than silently
 # docking the paper for evidence nobody asked for.
 max_review_exchanges = 2
+# After this many review rounds, stop patching the same prose and return
+# the task to research so the next submission is backed by new evidence.
+max_paper_revision_rounds = 3
 # Ceiling on collaboration rounds between co-authoring students.
 max_collaboration_rounds = 6
 # Tasks a professor may open in one decomposition.
 max_tasks_per_decomposition = 3
+
+[labs.9]
+# Paper 55 exposed a measured generation-quality regression: six
+# MiniMax-authored papers received 167 reviews without one strong_accept.
+# Re-run this lab with Codex authors and a three-family panel; Codex has
+# one vote but never a majority over a paper from its own family.
+generation_backend = "codex"
+review_panel = ["codex", "ollama_cloud_review", "ollama_cloud"]
+max_supervision_rounds = 30
+max_review_exchanges = 2
+max_paper_revision_rounds = 1

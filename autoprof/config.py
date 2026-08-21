@@ -44,6 +44,12 @@ DEFAULT_MAX_REJECTED_PAPERS = 5
 # the bar. Two is enough to ask and to follow up once.
 DEFAULT_MAX_REVIEW_EXCHANGES = 2
 
+# Review rounds spent patching the same prose before the task must return
+# to research and produce a new paper. Unlimited in-place revision caused
+# papers to absorb every objection, grow past CLI limits, and invent new
+# untested claims while the missing experiment never happened.
+DEFAULT_MAX_PAPER_REVISION_ROUNDS = 3
+
 # How many tasks a professor may open in one decomposition. Each costs a
 # student and a full chain of model calls, so the default keeps a lab on a
 # workable front; a lab that genuinely spans several independent problems
@@ -222,6 +228,36 @@ def max_review_exchanges(
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_REVIEW_EXCHANGES
+
+
+def max_paper_revision_rounds(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
+    """Rounds on one paper before rejection returns its task to research.
+
+    A scoped zero retains the existing unlimited behaviour for a lab that
+    explicitly wants it. The global value is clamped to at least one.
+    """
+    env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_PAPER_REVISION_ROUNDS", "max_paper_revision_rounds",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped is not None:
+        return scoped
+    raw = env.get("AUTOPROF_MAX_PAPER_REVISION_ROUNDS")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_paper_revision_rounds")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_PAPER_REVISION_ROUNDS
 
 
 def max_supervision_rounds(

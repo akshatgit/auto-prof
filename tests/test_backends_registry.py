@@ -93,6 +93,24 @@ class ResolveBackendNameTests(unittest.TestCase):
             "ollama_cloud",
         )
 
+    def test_lab_scoped_kind_override_is_more_specific_than_generation_backend(self):
+        env = {
+            "AUTOPROF_GENERATION_BACKEND_9": "codex",
+            "AUTOPROF_BACKEND_STUDENT_WORK_9": "ollama_cloud_review",
+        }
+        self.assertEqual(
+            resolve_backend_name("student_work", {}, env, lab_id=9),
+            "ollama_cloud_review",
+        )
+        self.assertEqual(
+            resolve_backend_name("student_write_paper", {}, env, lab_id=9),
+            "codex",
+        )
+        self.assertEqual(
+            resolve_backend_name("student_work", {}, env, lab_id=8),
+            "ollama_cloud",
+        )
+
 
 class LoadConfigTests(unittest.TestCase):
     def test_missing_path_returns_empty_dict(self):

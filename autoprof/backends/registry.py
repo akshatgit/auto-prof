@@ -103,6 +103,14 @@ def resolve_backend_name(
     kind: str, config: dict, env: dict, reviewer_index: int | None = None,
     lab_id: int | None = None,
 ) -> str:
+    # The most specific route wins. This lets one operation in one lab use
+    # a fallback provider after a deterministic provider-side refusal
+    # without moving that lab's paper authoring or every other active lab.
+    if lab_id is not None:
+        scoped_kind_key = f"AUTOPROF_BACKEND_{kind.upper()}_{lab_id}"
+        if env.get(scoped_kind_key):
+            return env[scoped_kind_key]
+
     per_kind_env_key = f"AUTOPROF_BACKEND_{kind.upper()}"
     if env.get(per_kind_env_key):
         return env[per_kind_env_key]
@@ -112,6 +120,20 @@ def resolve_backend_name(
         return overrides[kind]
 
     category = classify_kind(kind)
+
+    # A commissioned lab may need a different authoring model without
+    # changing every other active lab. This is especially important when
+    # a measured paper-quality regression requires re-running one lab with
+    # a stronger generator while its independent review panel stays on
+    # other model families.
+    if category == "generation" and lab_id is not None:
+        scoped_env_key = f"AUTOPROF_GENERATION_BACKEND_{lab_id}"
+        if env.get(scoped_env_key):
+            return env[scoped_env_key]
+        labs = config.get("labs", {})
+        lab_config = labs.get(str(lab_id), {}) if isinstance(labs, dict) else {}
+        if isinstance(lab_config, dict) and lab_config.get("generation_backend"):
+            return str(lab_config["generation_backend"])
 
     # Panel assignment sits below the explicit per-kind overrides (so
     # pinning a kind to one backend still works) but above the category
@@ -142,10 +164,19 @@ def backend_options(name: str, config: dict, env: dict) -> dict:
     source. Same precedence as everything else here: env, then config,
     then the class default.
     """
+    backends = config.get("backends", {})
+    # Codex had no model hook at all, so it always inherited whatever
+    # ~/.codex/config.toml named globally. That matters beyond taste: the
+    # default gpt-5.6-sol refuses lab #9's build-cache-soundness prompts as
+    # a cybersecurity risk, while gpt-5.5 answers the identical prompt --
+    # measured, 4 of 4. Without this, the only way to pick the model that
+    # works was to change the user's global CLI config for every project.
+    if name == "codex":
+        model = env.get("AUTOPROF_CODEX_MODEL") or backends.get("codex_model")
+        return {"model": str(model)} if model else {}
     if name not in {"ollama_cloud", "ollama_cloud_review"}:
         return {}
     opts = {}
-    backends = config.get("backends", {})
     if name == "ollama_cloud_review":
         model = (
             env.get("AUTOPROF_OLLAMA_REVIEW_MODEL")

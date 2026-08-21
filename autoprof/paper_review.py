@@ -420,6 +420,19 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         # asking again is the same question that failed to terminate.
         # trg_tasks_release_student frees the student.
         conn.execute("UPDATE tasks SET status = 'abandoned' WHERE id = ?", (paper["task_id"],))
+    elif (
+        (revision_limit := config.max_paper_revision_rounds(lab_id=task["lab_id"]))
+        and paper["review_round"] >= revision_limit
+    ):
+        # The objections now require new evidence, not another prose patch.
+        # Leave this paper rejected with its review history intact and start
+        # a fresh research attempt. A later ready decision creates a new
+        # paper row, so the old artifact remains auditable.
+        conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_work', 'task', ?, 'pending')",
+            (paper["task_id"],),
+        )
     else:
         # Revise-and-resubmit (§3.2 step 4). Without this a rejected paper
         # is a dead end -- the same gap `lab revise` closed for labs. The

@@ -37,6 +37,26 @@ class RenderLabListTests(unittest.TestCase):
 
 
 class RenderLabDetailTests(unittest.TestCase):
+    def test_root_problem_is_safe_rendered_markdown(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        conn.execute(
+            "UPDATE labs SET root_problem = ? WHERE id = ?",
+            (
+                "## Study design\n\n**Critical arm:** size-matched control\n\n"
+                "- classical\n- post-quantum\n\n<script>alert(1)</script>",
+                ids["lab_id"],
+            ),
+        )
+        conn.commit()
+        page = webserver.render_lab_detail(conn, ids["lab_id"])
+        self.assertIn("<h3>Study design</h3>", page)
+        self.assertIn("<strong>Critical arm:</strong>", page)
+        self.assertIn("<li>classical</li>", page)
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        conn.close()
+
     def test_shows_tasks_and_professor(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
@@ -54,7 +74,7 @@ class RenderLabDetailTests(unittest.TestCase):
     def test_shows_reviews_if_any(self):
         conn = fresh_db()
         ids = seed_lab_with_student(conn)
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, verdict, rationale_path) "
             "VALUES ('lab', ?, 1, 1, 'strong_accept', 'r.md')",
             (ids["lab_id"],),
@@ -62,6 +82,8 @@ class RenderLabDetailTests(unittest.TestCase):
         conn.commit()
         html = webserver.render_lab_detail(conn, ids["lab_id"])
         self.assertIn("strong_accept", html)
+        self.assertIn(f"href='/reviews/{cur.lastrowid}'", html)
+        self.assertIn("rationale", html)
         conn.close()
 
 
@@ -282,6 +304,76 @@ class TaskDetailTests(unittest.TestCase):
         self.assertIn("A Paper", html)
         self.assertIn("an inherited premise", html)
         self.assertIn("meeting 1", html)
+        conn.close()
+
+    def test_tool_runs_are_clickable(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        cur = conn.execute(
+            "INSERT INTO tool_runs (lab_id, task_id, student_id, tool, input_path, "
+            "output_path, status, summary) VALUES (?, ?, ?, 'verify', 'in.txt', "
+            "'out.txt', 'ok', 'verified')",
+            (ids["lab_id"], ids["task_id"], ids["student_id"]),
+        )
+        conn.commit()
+        with tempfile.TemporaryDirectory() as d:
+            page = webserver.render_task_detail(conn, ids["task_id"], Path(d))
+        self.assertIn(f"href='/tools/{cur.lastrowid}'", page)
+        conn.close()
+
+
+class ToolRunDetailTests(unittest.TestCase):
+    def _seed_run(self, status="ok", output="RESULT: 42"):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        cur = conn.execute(
+            "INSERT INTO tool_runs (lab_id, task_id, student_id, tool, input_path, "
+            "output_path, status, summary) VALUES (?, ?, ?, 'verify', ?, ?, ?, ?)",
+            (
+                ids["lab_id"], ids["task_id"], ids["student_id"],
+                f"{ids['lab_id']}/tools/input.txt",
+                f"{ids['lab_id']}/tools/output.txt",
+                status, output,
+            ),
+        )
+        conn.commit()
+        return conn, ids, cur.lastrowid
+
+    def test_shows_arguments_result_and_empty_error(self):
+        conn, ids, run_id = self._seed_run()
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            artifact_dir = root / str(ids["lab_id"]) / "tools"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "input.txt").write_text("print('<unsafe>')")
+            (artifact_dir / "output.txt").write_text("RESULT: 42")
+            page = webserver.render_tool_run(conn, run_id, root)
+        self.assertIn("Arguments", page)
+        self.assertIn("Result", page)
+        self.assertIn("Error", page)
+        self.assertIn("RESULT: 42", page)
+        self.assertIn("&lt;unsafe&gt;", page)
+        self.assertNotIn("<unsafe>", page)
+        conn.close()
+
+    def test_failed_call_places_output_under_error(self):
+        conn, ids, run_id = self._seed_run(status="error", output="boom")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            artifact_dir = root / str(ids["lab_id"]) / "tools"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "input.txt").write_text("raise Error()")
+            (artifact_dir / "output.txt").write_text("boom")
+            page = webserver.render_tool_run(conn, run_id, root)
+        self.assertIn("<h2>Result</h2><p><em>none</em></p>", page)
+        self.assertIn("<h2>Error</h2><pre", page)
+        self.assertIn("boom", page)
+        conn.close()
+
+    def test_missing_tool_run_is_none(self):
+        conn = fresh_db()
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(webserver.render_tool_run(conn, 999, Path(d)))
         conn.close()
 
 

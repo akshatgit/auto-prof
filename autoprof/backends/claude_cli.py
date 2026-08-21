@@ -146,19 +146,16 @@ class ClaudeBackend(Backend):
         model = opts.get("model", self.model)
         if model:
             cmd += ["--model", model]
-        cmd.append(prompt)
-
         try:
-            # stdin=DEVNULL for the same reason as Codex: `claude -p` reads
-            # the prompt from stdin when one is attached, and a daemon
-            # inherits a pipe nobody writes to -- the call then blocks
-            # until the timeout with no useful error.
+            # `claude -p` reads its prompt from stdin when the positional
+            # prompt is omitted. This avoids Linux's per-argument 128 KiB
+            # ceiling and still closes the daemon's stdin deterministically.
             proc = self.runner(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                stdin=subprocess.DEVNULL,
+                input=prompt,
             )
         except subprocess.TimeoutExpired as e:
             partial = getattr(e, "output", None) or ""

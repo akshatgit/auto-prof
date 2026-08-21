@@ -1,4 +1,4 @@
-"""Tests for the Claude CLI backend and the mixed review panel.
+"""Tests for the optional Claude CLI backend and the mixed review panel.
 
 The panel tests matter more than the backend tests: a panel that silently
 collapses to one model family still passes every review gate in the
@@ -60,8 +60,16 @@ class ClaudeBackendTests(unittest.TestCase):
         self.assertIn("--permission-mode", cmd)
         # A reviewer that can edit could 'fix' the paper it is judging.
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "plan")
-        self.assertEqual(cmd[-1], "judge this")
-        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertNotIn("judge this", cmd)
+        self.assertEqual(kwargs["input"], "judge this")
+
+    def test_large_prompt_is_piped_instead_of_put_in_argv(self):
+        calls = []
+        prompt = "x" * 150_000
+        ClaudeBackend(runner=fake_run(ok_payload(), capture=calls)).run(prompt)
+        cmd, kwargs = calls[0]
+        self.assertNotIn(prompt, cmd)
+        self.assertEqual(kwargs["input"], prompt)
 
     def test_resume_passes_the_session_id(self):
         calls = []
@@ -120,7 +128,7 @@ class ReviewPanelTests(unittest.TestCase):
             registry.resolve_backend_name("paper_review", {}, {}, i) for i in (1, 2, 3)
         }
         self.assertGreater(len(names), 1)
-        self.assertIn("claude", names)
+        self.assertIn("ollama_cloud_review", names)
         self.assertIn("codex", names)
 
     def test_a_five_member_defense_panel_stays_mixed(self):
@@ -134,13 +142,19 @@ class ReviewPanelTests(unittest.TestCase):
         self.assertEqual(first, registry.resolve_backend_name("paper_review", {}, {}, 2))
 
     def test_env_overrides_the_panel(self):
-        env = {"AUTOPROF_REVIEW_PANEL": "claude, codex, claude"}
-        self.assertEqual(registry.resolve_backend_name("paper_review", {}, env, 1), "claude")
+        env = {"AUTOPROF_REVIEW_PANEL": "ollama_cloud_review, codex, ollama_cloud_review"}
+        self.assertEqual(
+            registry.resolve_backend_name("paper_review", {}, env, 1),
+            "ollama_cloud_review",
+        )
         self.assertEqual(registry.resolve_backend_name("paper_review", {}, env, 2), "codex")
 
     def test_config_sets_the_panel_when_env_is_silent(self):
-        config = {"backends": {"review_panel": ["claude", "claude"]}}
-        self.assertEqual(registry.resolve_backend_name("paper_review", config, {}, 1), "claude")
+        config = {"backends": {"review_panel": ["ollama_cloud_review", "codex"]}}
+        self.assertEqual(
+            registry.resolve_backend_name("paper_review", config, {}, 1),
+            "ollama_cloud_review",
+        )
 
     def test_an_explicit_per_kind_pin_still_beats_the_panel(self):
         env = {"AUTOPROF_BACKEND_PAPER_REVIEW": "codex"}
@@ -151,13 +165,29 @@ class ReviewPanelTests(unittest.TestCase):
             registry.resolve_backend_name("student_work", {}, {}, 2), "ollama_cloud"
         )
 
+    def test_generation_backend_can_be_scoped_to_one_lab_by_environment(self):
+        env = {"AUTOPROF_GENERATION_BACKEND_9": "codex"}
+        self.assertEqual(
+            registry.resolve_backend_name("student_work", {}, env, lab_id=9), "codex"
+        )
+        self.assertEqual(
+            registry.resolve_backend_name("student_work", {}, env, lab_id=8), "ollama_cloud"
+        )
+
+    def test_generation_backend_can_be_scoped_to_one_lab_by_config(self):
+        config = {"labs": {"9": {"generation_backend": "codex"}}}
+        self.assertEqual(
+            registry.resolve_backend_name("student_write_paper", config, {}, lab_id=9),
+            "codex",
+        )
+
     def test_no_reviewer_index_falls_back_to_the_category_default(self):
         self.assertEqual(registry.resolve_backend_name("paper_review", {}, {}), "codex")
 
     def test_registry_hands_out_the_panel_backend(self):
         reg = registry.Registry(env={})
         self.assertEqual(reg.get_backend("paper_review", 1).name, "codex")
-        self.assertEqual(reg.get_backend("paper_review", 2).name, "claude")
+        self.assertEqual(reg.get_backend("paper_review", 2).name, "ollama_cloud")
 
 
 if __name__ == "__main__":

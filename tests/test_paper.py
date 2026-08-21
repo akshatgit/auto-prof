@@ -3,6 +3,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -24,10 +25,16 @@ class ScriptedBackend(Backend):
     def __init__(self, result: BackendResult):
         self.result = result
         self.calls = []
+        self.options = []
 
     def run(self, prompt, **opts):
         self.calls.append(prompt)
+        self.options.append(opts)
         return self.result
+
+
+class ScriptedCodexBackend(ScriptedBackend):
+    name = "codex"
 
 
 def _enqueue(conn, kind: str, task_id: int) -> int:
@@ -119,6 +126,25 @@ class StudentWorkJobTests(unittest.TestCase):
         self.assertIn("Task 1", prompt)
         self.assertIn("done when proved", prompt)
         self.assertIn("tried induction, failed", prompt)
+        self.assertIn("defensive software-quality research", prompt)
+        self.assertIn("isolated local containers", prompt)
+        conn.close()
+
+    def test_codex_research_uses_writable_workspace_without_requesting_git_writes(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = _enqueue(conn, "student_work", ids["task_id"])
+        backend = ScriptedCodexBackend(BackendResult(text="implemented and tested"))
+
+        with tempfile.TemporaryDirectory() as d, patch.dict(
+            "os.environ", {f"AUTOPROF_REPO_ROOT_{ids['lab_id']}": d}
+        ):
+            paper.execute_student_work_job(conn, job_id, backend, Path(d))
+
+        self.assertEqual(backend.options[0]["sandbox"], "workspace-write")
+        self.assertEqual(backend.options[0]["cwd"], str(Path(d).resolve()))
+        self.assertIn("do not attempt to write `.git` metadata", backend.calls[0])
+        self.assertIn("orchestrator will preserve", backend.calls[0])
         conn.close()
 
 
@@ -227,6 +253,45 @@ class EmptyWorkOutputTests(unittest.TestCase):
             conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='student_write_paper'").fetchone()[0],
             0,
         )
+        conn.close()
+
+    def test_tool_round_exhaustion_does_not_store_the_pending_call(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = _enqueue(conn, "student_work", ids["task_id"])
+        backend = ScriptedBackend(
+            BackendResult(text="```tool:verify\nprint('again')\n```")
+        )
+
+        with tempfile.TemporaryDirectory() as d, patch.object(
+            paper.config, "max_tool_rounds", return_value=1
+        ):
+            lab_dir = Path(d)
+            memory = lab_dir / ids["student_memory_path"]
+            memory.parent.mkdir(parents=True)
+            memory.write_text("verified prior result")
+            outcome = paper.execute_student_work_job(conn, job_id, backend, lab_dir)
+
+            self.assertIn(outcome, ("retrying", "failed"))
+            self.assertEqual(memory.read_text(), "verified prior result")
+        self.assertEqual(len(backend.calls), 2)
+        conn.close()
+
+    def test_malformed_tool_output_fails_without_erasing_memory(self):
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        job_id = _enqueue(conn, "student_work", ids["task_id"])
+        backend = ScriptedBackend(BackendResult(text="```tool:readfile\nimportant.py"))
+
+        with tempfile.TemporaryDirectory() as d:
+            lab_dir = Path(d)
+            memory = lab_dir / ids["student_memory_path"]
+            memory.parent.mkdir(parents=True)
+            memory.write_text("verified prior result")
+            outcome = paper.execute_student_work_job(conn, job_id, backend, lab_dir)
+            self.assertIn(outcome, ("retrying", "failed"))
+            self.assertEqual(memory.read_text(), "verified prior result")
+
         conn.close()
 
 

@@ -29,6 +29,7 @@ td, th {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #dd
 .status {{ font-family: monospace; }}
 a {{ color: #06c; }}
 pre {{ white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; border-radius: 4px; }}
+.tool-payload {{ max-height: 32rem; overflow: auto; border: 1px solid #e2e2e2; }}
 /* Not <pre>: MathJax skips pre/code by default, so LaTeX inside one is
    never typeset. pre-wrap here keeps the source formatting while still
    letting MathJax process the content. */
@@ -141,9 +142,10 @@ def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
 
     review_rows = "".join(
         f"<tr><td>round {r['review_round']}</td><td>{_reviewer_label(r)}</td>"
-        f"<td class='status'>{_e(r['verdict'])}</td></tr>"
+        f"<td class='status'>{_e(r['verdict'])}</td>"
+        f"<td><a href='/reviews/{r['id']}'>rationale</a></td></tr>"
         for r in reviews
-    ) or "<tr><td colspan='3'><em>no reviews yet</em></td></tr>"
+    ) or "<tr><td colspan='4'><em>no reviews yet</em></td></tr>"
 
     body = (
         f"<p><a href='/'>&larr; all labs</a></p>"
@@ -151,9 +153,10 @@ def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
         f"<p>status: <span class='status'>{_e(lab['status'])}</span> "
         f"&mdash; professor: <a href='/professors/{professor['id']}'>{_e(professor['name'])}</a> "
         f"({_e(professor['field'])})</p>"
-        f"<h2>Root problem</h2><div class='mathdoc'>{_e(lab['root_problem'])}</div>"
+        f"<h2>Root problem</h2><div class='doc'>{markdown.render(lab['root_problem'])}</div>"
         f"<h2>Tasks</h2><table><tr><th>id</th><th>title</th><th>status</th><th>direction</th><th>papers</th></tr>{task_rows}</table>"
-        f"<h2>Lab reviews</h2><table><tr><th>round</th><th>reviewer</th><th>verdict</th></tr>{review_rows}</table>"
+        f"<h2>Lab reviews</h2><table><tr><th>round</th><th>reviewer</th>"
+        f"<th>verdict</th><th></th></tr>{review_rows}</table>"
     )
     return _PAGE.format(title=f"autoprof — Lab #{lab['id']}", body=body)
 
@@ -495,7 +498,8 @@ def render_task_detail(conn: sqlite3.Connection, task_id: int, lab_dir) -> str |
         "SELECT * FROM tool_runs WHERE task_id = ? ORDER BY id DESC LIMIT 20", (task_id,)
     ).fetchall()
     tool_rows = "".join(
-        f"<tr><td>#{t['id']}</td><td>{_e(t['tool'])}</td>"
+        f"<tr><td><a href='/tools/{t['id']}'>#{t['id']}</a></td>"
+        f"<td><a href='/tools/{t['id']}'>{_e(t['tool'])}</a></td>"
         f"<td class='status'>{_e(t['status'])}</td>"
         f"<td>{_e((t['summary'] or '')[:80])}</td></tr>"
         for t in tools_run
@@ -522,6 +526,42 @@ def render_task_detail(conn: sqlite3.Connection, task_id: int, lab_dir) -> str |
         f"{tool_rows}</table>"
     )
     return _PAGE.format(title=f"autoprof — Task #{task['id']}", body=body)
+
+
+def render_tool_run(conn: sqlite3.Connection, run_id: int, lab_dir) -> str | None:
+    """Render one recorded tool call without executing artifact content.
+
+    Inputs and outputs are escaped inside ``pre`` elements.  In particular,
+    an SVG or HTML-producing tool is shown as source rather than injected into
+    the UI page.
+    """
+    run = conn.execute("SELECT * FROM tool_runs WHERE id = ?", (run_id,)).fetchone()
+    if run is None:
+        return None
+
+    arguments = _read_artifact(lab_dir, run["input_path"])
+    output = _read_artifact(lab_dir, run["output_path"])
+    arguments_html = _e(arguments if arguments is not None else "(arguments artifact missing)")
+    output_html = _e(output if output is not None else "(output artifact missing)")
+
+    if run["status"] == "ok":
+        result_html = f"<pre class='tool-payload'>{output_html}</pre>"
+        error_html = "<p><em>none</em></p>"
+    else:
+        result_html = "<p><em>none</em></p>"
+        error_html = f"<pre class='tool-payload'>{output_html}</pre>"
+
+    back = f"/tasks/{run['task_id']}" if run["task_id"] is not None else f"/labs/{run['lab_id']}"
+    body = (
+        f"<p><a href='{back}'>&larr; back</a></p>"
+        f"<h1>Tool call #{run['id']}: {_e(run['tool'])}</h1>"
+        f"<p>status: <span class='status'>{_e(run['status'])}</span> "
+        f"&mdash; created: {_e(run['created_at'])}</p>"
+        f"<h2>Arguments</h2><pre class='tool-payload'>{arguments_html}</pre>"
+        f"<h2>Result</h2>{result_html}"
+        f"<h2>Error</h2>{error_html}"
+    )
+    return _PAGE.format(title=f"autoprof — Tool call #{run['id']}", body=body)
 
 
 def render_supervision(conn: sqlite3.Connection, task_id: int, round_: int, lab_dir) -> str | None:
@@ -551,6 +591,7 @@ _ROUTES = [
     (re.compile(r"^/papers/(\d+)/full$"), lambda conn, m, d: render_paper_full(conn, int(m.group(1)), d)),
     (re.compile(r"^/reviews/(\d+)$"), lambda conn, m, d: render_review_rationale(conn, int(m.group(1)), d)),
     (re.compile(r"^/tasks/(\d+)$"), lambda conn, m, d: render_task_detail(conn, int(m.group(1)), d)),
+    (re.compile(r"^/tools/(\d+)$"), lambda conn, m, d: render_tool_run(conn, int(m.group(1)), d)),
     (re.compile(r"^/supervision/(\d+)/(\d+)$"),
      lambda conn, m, d: render_supervision(conn, int(m.group(1)), int(m.group(2)), d)),
 ]
@@ -584,6 +625,12 @@ def make_server(db_path, host: str = "127.0.0.1", port: int = 8765, lab_dir=None
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
+            # Every page is a live read of research state that changes every
+            # few minutes. With no cache directive at all the browser is free
+            # to reuse a heuristically-cached copy, which showed a stale lab
+            # -- old tool runs, an old paper round -- while the database had
+            # already moved on. Nothing here is cacheable by construction.
+            self.send_header("Cache-Control", "no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(encoded)
 

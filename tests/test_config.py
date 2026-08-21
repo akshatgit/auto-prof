@@ -87,10 +87,17 @@ class MaxAcceptedPapersTests(unittest.TestCase):
             ("AUTOPROF_MAX_COLLABORATION_ROUNDS_9", config.max_collaboration_rounds),
             ("AUTOPROF_MAX_LAB_REVIEW_ROUNDS_9", config.max_lab_review_rounds),
             ("AUTOPROF_MAX_TOOL_ROUNDS_9", config.max_tool_rounds),
+            ("AUTOPROF_MAX_PAPER_REVISION_ROUNDS_9", config.max_paper_revision_rounds),
         ]
         for name, getter in names_and_getters:
             with self.subTest(name=name):
                 self.assertEqual(getter(env={name: "0"}, lab_id=9), 0)
+
+    def test_paper_revision_rounds_default_and_lab_override(self):
+        self.assertEqual(config.max_paper_revision_rounds(env={}), 3)
+        env = {"AUTOPROF_MAX_PAPER_REVISION_ROUNDS_9": "1"}
+        self.assertEqual(config.max_paper_revision_rounds(env=env, lab_id=9), 1)
+        self.assertEqual(config.max_paper_revision_rounds(env=env, lab_id=8), 3)
 
 
 if __name__ == "__main__":

@@ -306,17 +306,19 @@ same machinery as any other lab.
   exist; only an empirical test killed it. Convergence among like
   reviewers is not calibration.
 - So reviewer *n* is resolved through `DEFAULT_REVIEW_PANEL`
-  (`codex, claude, codex`), cycling if the gate has more reviewers than
-  the panel has entries — a 5-member defense panel is therefore
-  codex/claude/codex/claude/codex and can never collapse to one family.
+  (`codex, ollama_cloud_review, codex`), cycling if the gate has more
+  reviewers than the panel has entries. `ollama_cloud_review` has its own
+  model setting, separate from the Ollama generation model; the shipped
+  configuration uses DeepSeek for review and MiniMax for generation.
   Override with `AUTOPROF_REVIEW_PANEL` or `backends.review_panel` in
   config. Mixing does not make any single review better; it decorrelates
   the panel's errors, which is what makes the vote informative.
 - Each review row records `reviewer_backend`, so a panel that silently
   collapsed to one family is visible after the fact, and cross-family
   disagreement rates are measurable rather than assumed.
-- Claude reviewers run with `--permission-mode plan`: a reviewer that
-  could edit files could "fix" the paper it was judging.
+- Ollama Cloud reviewers receive only the review prompt over the generate
+  API and have no filesystem or tool access. The optional Claude backend,
+  if explicitly configured, still runs with `--permission-mode plan`.
 - The rubric forces a machine-parseable verdict line:
   `VERDICT: strong_accept|accept|weak_accept|weak_reject|reject|strong_reject`
   The harness parses this line; the full response is stored verbatim as
