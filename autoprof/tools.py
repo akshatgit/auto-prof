@@ -540,7 +540,7 @@ def run_experiment(body: str, lab_id: int | None = None) -> dict:
         create = subprocess.run(
             [sys.executable, "-m", "autoprof", "create-prof", "--yes", "--no-references",
              "--db-path", db_path, "--lab-dir", lab_root, tagged],
-            cwd=repo, capture_output=True, text=True, env=env,
+            cwd=repo, capture_output=True, text=True, errors="replace", env=env,
             timeout=EXPERIMENT_TIMEOUT, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
@@ -629,7 +629,7 @@ def run_workspace_experiment(spec: dict, lab_id: int | None) -> dict:
     }
     try:
         proc = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True, timeout=timeout,
+            argv, cwd=root, capture_output=True, text=True, errors="replace", timeout=timeout,
             stdin=subprocess.DEVNULL, env=env,
         )
     except subprocess.TimeoutExpired as e:
@@ -749,7 +749,7 @@ def run_shell(body: str, *, lab_id: int | None, task_id: int | None, lab_dir) ->
 
     try:
         proc = subprocess.run(
-            ["bash", "-c", script], cwd=home, capture_output=True, text=True,
+            ["bash", "-c", script], cwd=home, capture_output=True, text=True, errors="replace",
             timeout=timeout, stdin=subprocess.DEVNULL, env=env,
         )
     except subprocess.TimeoutExpired as e:
@@ -1004,7 +1004,7 @@ APPLY_TEST_TIMEOUT = 600
 
 def _git(root: Path, *args, timeout: int = 120):
     return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True,
+        ["git", *args], cwd=root, capture_output=True, text=True, errors="replace",
         timeout=timeout, stdin=subprocess.DEVNULL,
     )
 
@@ -1037,7 +1037,7 @@ def commit_workspace(lab_id: int | None, message: str) -> dict:
 
     try:
         tests = subprocess.run(
-            list(APPLY_TEST_COMMAND), cwd=root, capture_output=True, text=True,
+            list(APPLY_TEST_COMMAND), cwd=root, capture_output=True, text=True, errors="replace",
             timeout=WORKSPACE_EXEC_TIMEOUT, stdin=subprocess.DEVNULL,
         )
         verdict = "tests passed" if tests.returncode == 0 else f"TESTS FAILED (exit {tests.returncode})"
@@ -1173,7 +1173,7 @@ def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
     for candidate in ladders:
         check = subprocess.run(
             ["git", "apply", "--check", *candidate, "-"], cwd=root, input=diff,
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, errors="replace", timeout=60,
         )
         if check.returncode == 0:
             flags = candidate
@@ -1200,14 +1200,14 @@ def run_apply_patch(body: str, lab_id: int | None = None) -> dict:
 
     applied = subprocess.run(
         ["git", "apply", *flags, "-"], cwd=root, input=diff,
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, errors="replace", timeout=60,
     )
     if applied.returncode != 0:
         return {"status": "error", "output": f"(apply failed)\n{applied.stderr.strip()[:800]}"}
 
     try:
         tests = subprocess.run(
-            list(APPLY_TEST_COMMAND), cwd=root, capture_output=True, text=True,
+            list(APPLY_TEST_COMMAND), cwd=root, capture_output=True, text=True, errors="replace",
             timeout=APPLY_TEST_TIMEOUT, stdin=subprocess.DEVNULL,
         )
         passed = tests.returncode == 0
@@ -1397,7 +1397,7 @@ def run_verifier(code: str, timeout: int = VERIFY_TIMEOUT_SECONDS,
             proc = subprocess.run(
                 argv,
                 capture_output=True,
-                text=True,
+                text=True, errors="replace",
                 timeout=timeout,
                 cwd=work_dir,
                 stdin=subprocess.DEVNULL,

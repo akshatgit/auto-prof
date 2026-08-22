@@ -65,7 +65,7 @@ def extract_text(path: Path) -> str:
             proc = subprocess.run(
                 ["pdftotext", "-layout", str(path), "-"],
                 capture_output=True,
-                text=True,
+                text=True, errors="replace",
                 timeout=120,
                 stdin=subprocess.DEVNULL,
             )

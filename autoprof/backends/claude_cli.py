@@ -155,7 +155,7 @@ class ClaudeBackend(Backend):
             proc = self.runner(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=True, errors="replace",
                 timeout=self.timeout,
                 idle_timeout=getattr(self, "idle_timeout", None),
                 on_progress=opts.get("on_progress"),

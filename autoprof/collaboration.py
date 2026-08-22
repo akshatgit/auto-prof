@@ -236,7 +236,7 @@ def _enqueue_round(conn: sqlite3.Connection, collab_id: int) -> int:
 def render_shared(conn: sqlite3.Connection, collab_id: int, lab_dir: Path) -> str:
     row = conn.execute("SELECT memory_path FROM collaborations WHERE id = ?", (collab_id,)).fetchone()
     path = lab_dir / row["memory_path"]
-    body = path.read_text() if path.exists() else "(no shared state yet)"
+    body = path.read_text(errors="replace") if path.exists() else "(no shared state yet)"
     return f"The collaboration's shared working state:\n<shared_state>\n{body}\n</shared_state>"
 
 
@@ -262,7 +262,7 @@ def render_others(
     parts = []
     for row in rows:
         path = lab_dir / row["path"]
-        body = path.read_text() if path.exists() else "(contribution missing)"
+        body = path.read_text(errors="replace") if path.exists() else "(contribution missing)"
         parts.append(f"--- Student {row['student_id']}, round {row['round']} ---\n{body}")
     return (
         "Your co-authors' contributions from the previous round. Engage with these directly:\n"
@@ -296,7 +296,7 @@ def execute_collaboration_round_job(
     lab = conn.execute("SELECT * FROM labs WHERE id = ?", (collab["lab_id"],)).fetchone()
 
     own_path = lab_dir / student["memory_path"]
-    own_memory = own_path.read_text() if own_path.exists() else "(no individual work recorded)"
+    own_memory = own_path.read_text(errors="replace") if own_path.exists() else "(no individual work recorded)"
 
     result = jobs.run_with_session(
         conn,
@@ -403,7 +403,7 @@ def execute_collaboration_synthesis_job(
     parts = []
     for contribution in rows:
         path = lab_dir / contribution["path"]
-        body = path.read_text() if path.exists() else "(contribution missing)"
+        body = path.read_text(errors="replace") if path.exists() else "(contribution missing)"
         parts.append(f"--- Student {contribution['student_id']} ---\n{body}")
 
     result = jobs.run_with_session(

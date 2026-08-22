@@ -268,10 +268,10 @@ def _load_context(conn, task_id: int, lab_dir: Path):
     lab = conn.execute("SELECT * FROM labs WHERE id = ?", (task["lab_id"],)).fetchone()
 
     memory_file = lab_dir / student["memory_path"]
-    memory = memory_file.read_text() if memory_file.exists() else "(no memory recorded yet)"
+    memory = memory_file.read_text(errors="replace") if memory_file.exists() else "(no memory recorded yet)"
 
     brief_file = lab_dir / task["brief_path"]
-    brief = brief_file.read_text() if brief_file.exists() else "(no brief written)"
+    brief = brief_file.read_text(errors="replace") if brief_file.exists() else "(no brief written)"
 
     return task, student, lab, memory, brief
 
@@ -647,7 +647,7 @@ def execute_student_revise_paper_job(
     reviews = []
     for review in review_rows:
         rationale_file = lab_dir / review["rationale_path"]
-        body = rationale_file.read_text() if rationale_file.exists() else "(rationale missing)"
+        body = rationale_file.read_text(errors="replace") if rationale_file.exists() else "(rationale missing)"
         reviews.append(f"--- Reviewer {review['reviewer_index']} ({review['verdict']}) ---\n{body}")
 
     revise_prompt = REVISE_PROMPT_TEMPLATE.format(

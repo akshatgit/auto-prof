@@ -254,7 +254,7 @@ def render_history(
         )
     for row in included:
         path = lab_dir / row["guidance_path"]
-        body = path.read_text() if path.exists() else "(guidance file missing)"
+        body = path.read_text(errors="replace") if path.exists() else "(guidance file missing)"
         parts.append(f"--- Meeting {row['round']} (you said: {row['verdict']}) ---\n{body}")
     return (
         preamble
@@ -329,9 +329,9 @@ def execute_professor_supervision_job(
     ).fetchone()
 
     memory_file = lab_dir / student["memory_path"]
-    memory = memory_file.read_text() if memory_file.exists() else "(no memory recorded yet)"
+    memory = memory_file.read_text(errors="replace") if memory_file.exists() else "(no memory recorded yet)"
     brief_file = lab_dir / task["brief_path"]
-    brief = brief_file.read_text() if brief_file.exists() else "(no brief written)"
+    brief = brief_file.read_text(errors="replace") if brief_file.exists() else "(no brief written)"
 
     round_ = _next_round(conn, task["id"])
 
@@ -504,7 +504,7 @@ def render_student_guidance(conn: sqlite3.Connection, task_id: int, lab_dir: Pat
 
     def body(row):
         path = lab_dir / row["guidance_path"]
-        return path.read_text() if path.exists() else "(guidance file missing)"
+        return path.read_text(errors="replace") if path.exists() else "(guidance file missing)"
 
     latest = rows[-1]
     out = [

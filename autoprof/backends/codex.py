@@ -366,7 +366,7 @@ class CodexBackend(Backend):
                 proc = self.runner(
                     cmd,
                     capture_output=True,
-                    text=True,
+                    text=True, errors="replace",
                     timeout=self.timeout,
                     idle_timeout=self.idle_timeout,
                     on_progress=opts.get("on_progress"),

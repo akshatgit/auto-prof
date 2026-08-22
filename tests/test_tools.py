@@ -1009,3 +1009,31 @@ class UnopenedToolFenceTests(unittest.TestCase):
     def test_a_tool_name_inside_a_fenced_body_is_not_a_second_call(self):
         text = '```tool:shell\ngrep -n "tool:shell" x.py\n```'
         self.assertEqual(tools.count_tool_calls(text), 1)
+
+
+class BinaryOutputToleranceTests(unittest.TestCase):
+    """A stray byte in tool output must not take down the whole job."""
+
+    def test_shell_survives_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lab_dir = Path(tmp)
+            out = tools.run_shell(
+                r"printf 'before\xa7after\n'",
+                lab_id=1, task_id=1, lab_dir=lab_dir,
+            )
+            self.assertEqual(out["status"], "ok")
+            self.assertIn("before", out["output"])
+            self.assertIn("after", out["output"])
+
+
+class GitBinaryOutputTests(unittest.TestCase):
+    """git prints byte-for-byte filenames; a non-UTF-8 one crashed the job."""
+
+    def test_git_helper_survives_a_non_utf8_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools._git(root, "init", "-q")
+            (root / b"odd-\xa7-name.txt".decode("latin-1")).write_bytes(b"x")
+            done = tools._git(root, "status", "--porcelain")
+            self.assertEqual(done.returncode, 0)
+            self.assertIn("odd-", done.stdout)
