@@ -10,6 +10,42 @@ from autoprof.runner import PromptSpec
 from tests.helpers import fresh_db, seed_lab_with_student
 
 
+def _drain(timeout=30):
+    """Wait for dispatched work to finish.
+
+    Dispatch schedules and returns, so a test that asserts on RESULTS has to
+    wait for them. Tests that assert on SCHEDULING should not call this.
+    """
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not daemon._reap_inflight():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _dispatch_until_drained(conn, reg, lab_dir, handlers, workers, path, budget=8, ticks=20):
+    """Dispatch repeatedly, as the daemon loop does.
+
+    One tick can schedule at most `workers` jobs now that dispatch does not
+    block; the rest are picked up by later ticks.
+    """
+    import time
+    total = 0
+    for _ in range(ticks):
+        total += daemon.dispatch_pending_jobs(
+            conn, reg, {}, lab_dir, budget_cap=budget,
+            special_handlers=handlers, workers=workers, db_path=path)
+        _drain()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status='pending'").fetchone()[0]
+        if not remaining:
+            break
+        time.sleep(0.02)
+    return total
+
+
 def _task_in_new_lab(conn, ids):
     """A task in its own lab.
 
@@ -572,11 +608,8 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 jobs_module.complete_job(conn_, job_id, lease)
                 return "done"
 
-            daemon.dispatch_pending_jobs(
-                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
-                special_handlers={"student_work": handler},
-                workers=4, db_path=path,
-            )
+            _dispatch_until_drained(
+                conn, self._Reg(), Path(tmp), {"student_work": handler}, 4, path)
             self.assertEqual(len(seen), len(set(seen)), "a job ran twice")
             self.assertEqual(len(seen), 8)
             conn.close()
@@ -605,6 +638,7 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 special_handlers={"student_work": handler},
                 workers=4, db_path=path,
             )
+            _drain()   # dispatch schedules; the overlap happens after it returns
             self.assertGreater(peak[0], 1, "jobs did not run concurrently")
             conn.close()
 
@@ -624,6 +658,7 @@ class ConcurrentDispatchTests(unittest.TestCase):
                 special_handlers={"student_work": handler},
                 workers=4, db_path=path,
             )
+            _drain()
             self.assertTrue(done)
             failed = conn.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status='failed'"
@@ -748,3 +783,110 @@ class WorkspaceSerializationTests(unittest.TestCase):
         a = self._job("student_work", self.task_a)
         b = self._job("student_work", other_task)
         self.assertEqual(self._kept_ids(), [a, b])
+
+
+class NonBlockingDispatchTests(unittest.TestCase):
+    """A tick must schedule work, not wait for it."""
+
+    class _Reg:
+        def get_backend(self, kind, reviewer_index=None, lab_id=None):
+            return SimpleNamespace(name="fake")
+
+    def setUp(self):
+        daemon._INFLIGHT.clear()
+        daemon._POOL = None
+        daemon._POOL_SIZE = 0
+
+    def tearDown(self):
+        daemon._INFLIGHT.clear()
+
+    def _db(self, tmp, n_jobs):
+        from autoprof import db as db_module
+        path = Path(tmp) / "c.db"
+        conn = db_module.connect(path)
+        db_module.ensure_initialized(conn)
+        ids = seed_lab_with_student(conn)
+        for _ in range(n_jobs):
+            conn.execute(
+                "INSERT INTO jobs (kind, target_type, target_id, status) "
+                "VALUES ('student_work', 'task', ?, 'pending')",
+                (_task_in_new_lab(conn, ids),),
+            )
+        conn.commit()
+        return path, conn
+
+    def test_tick_returns_while_jobs_are_still_running(self):
+        """The failure this rules out: one slow job freezing the daemon."""
+        import threading, time
+        release = threading.Event()
+
+        def handler(conn_, job_id, backend, lab_dir):
+            release.wait(timeout=30)
+            return "done"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 2)
+            start = time.time()
+            n = daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler},
+                workers=4, db_path=path,
+            )
+            elapsed = time.time() - start
+            self.assertEqual(n, 2)
+            self.assertLess(elapsed, 5, "dispatch blocked on job completion")
+            self.assertEqual(len(daemon._reap_inflight()), 2)
+            release.set()
+
+    def test_a_busy_pool_is_not_oversubscribed(self):
+        import threading
+        release = threading.Event()
+
+        def handler(conn_, job_id, backend, lab_dir):
+            release.wait(timeout=30)
+            return "done"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 6)
+            first = daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler}, workers=2, db_path=path)
+            second = daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler}, workers=2, db_path=path)
+            self.assertEqual(first, 2)
+            self.assertEqual(second, 0, "dispatched past the worker count")
+            release.set()
+
+    def test_the_same_job_is_not_submitted_twice(self):
+        import threading
+        release = threading.Event()
+
+        def handler(conn_, job_id, backend, lab_dir):
+            release.wait(timeout=30)
+            return "done"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 1)
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler}, workers=4, db_path=path)
+            again = daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": handler}, workers=4, db_path=path)
+            self.assertEqual(again, 0)
+            release.set()
+
+    def test_finished_jobs_free_their_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, conn = self._db(tmp, 2)
+            daemon.dispatch_pending_jobs(
+                conn, self._Reg(), {}, Path(tmp), budget_cap=8,
+                special_handlers={"student_work": lambda *a: "done"},
+                workers=2, db_path=path)
+            import time
+            for _ in range(50):
+                if not daemon._reap_inflight():
+                    break
+                time.sleep(0.1)
+            self.assertEqual(daemon._reap_inflight(), set())

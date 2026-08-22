@@ -7,6 +7,7 @@ themselves).
 
 import fcntl
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -208,6 +209,40 @@ WORKSPACE_WRITER_KINDS = frozenset(
 )
 
 
+# Jobs handed to the pool but not yet finished. The tick used to block on
+# `pool.map` until every job it dispatched completed, so one long research
+# round froze the whole daemon: six workers idle, four jobs pending, one
+# running, and no tick for four minutes. Reclaim could not fire either,
+# because it runs at the top of a tick and the tick was the thing stuck.
+_INFLIGHT: dict = {}
+_INFLIGHT_LOCK = threading.Lock()
+_POOL = None
+_POOL_SIZE = 0
+
+
+def _worker_pool(workers: int):
+    """One long-lived pool. A per-tick pool cannot outlive its tick."""
+    global _POOL, _POOL_SIZE
+    with _INFLIGHT_LOCK:
+        if _POOL is None or _POOL_SIZE != workers:
+            _POOL = ThreadPoolExecutor(max_workers=workers,
+                                       thread_name_prefix="autoprof-worker")
+            _POOL_SIZE = workers
+        return _POOL
+
+
+def _reap_inflight() -> set:
+    """Drop finished futures; return the job ids still executing."""
+    with _INFLIGHT_LOCK:
+        for job_id in [j for j, f in _INFLIGHT.items() if f.done()]:
+            future = _INFLIGHT.pop(job_id)
+            try:
+                future.result()
+            except Exception:   # noqa: BLE001 -- already recorded on the job row
+                pass
+        return set(_INFLIGHT)
+
+
 def _serialize_workspace_writers(conn: sqlite3.Connection, candidates: list) -> list:
     """At most one workspace-writing job per lab, and none while one runs.
 
@@ -235,6 +270,16 @@ def _serialize_workspace_writers(conn: sqlite3.Connection, candidates: list) -> 
         lab_id = _job_lab_id(conn, row)
         if lab_id is not None:
             busy.add(lab_id)
+    # A job just submitted has not necessarily claimed itself yet, so its lab
+    # would still look free for one tick and admit a second writer.
+    for job_id in _reap_inflight():
+        row = conn.execute(
+            "SELECT kind, target_type, target_id FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row is not None and row["kind"] in WORKSPACE_WRITER_KINDS:
+            lab_id = _job_lab_id(conn, row)
+            if lab_id is not None:
+                busy.add(lab_id)
 
     kept = []
     for candidate in candidates:
@@ -295,19 +340,23 @@ def dispatch_pending_jobs(
     if workers > 1:
         if db_path is None:
             raise ValueError("concurrent dispatch needs db_path so each worker can connect")
-        chosen = candidate_rows[:budget_cap]
+        pool = _worker_pool(workers)
+        inflight = _reap_inflight()
+        free = workers - len(inflight)
+        if free <= 0:
+            return 0
+        chosen = [row for row in candidate_rows if row["id"] not in inflight][:min(budget_cap, free)]
         if not chosen:
             return 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            outcomes = list(pool.map(
-                lambda row: _execute_one(
+        with _INFLIGHT_LOCK:
+            for row in chosen:
+                _INFLIGHT[row["id"]] = pool.submit(
+                    _execute_one,
                     db_path, row["id"], row["kind"], registry,
                     prompt_builders, lab_dir, special_handlers,
                     row["reviewer_index"],
-                ),
-                chosen,
-            ))
-        return sum(1 for outcome in outcomes if outcome != "not_claimed")
+                )
+        return len(chosen)
 
     for candidate in candidate_rows:
         if dispatched >= budget_cap:
