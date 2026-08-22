@@ -30,6 +30,12 @@ from .base import Backend, BackendResult
 # Set AUTOPROF_CODEX_TIMEOUT to a number of seconds to reinstate one.
 DEFAULT_TIMEOUT_SECONDS = None
 
+# Seconds of COMPLETE SILENCE before a call is abandoned. This replaces the
+# wall-clock kill: a job still emitting tokens is working however long it
+# takes, and killing it at a fixed 40 minutes destroyed healthy research
+# rounds. A job that has produced nothing for this long is the hung one.
+DEFAULT_IDLE_TIMEOUT_SECONDS = 900
+
 # Matches CLI phrasing like "try again in 45s" / "retry after 3m" / "in 2h".
 _RETRY_AFTER_RE = re.compile(r"(?:try again|retry)[^0-9]*?(\d+)\s*(s|sec|m|min|h|hour)", re.IGNORECASE)
 _RATE_LIMIT_MARKERS = ("rate limit", "rate-limited", "usage limit", "429")
@@ -286,12 +292,17 @@ def _write_diagnostic_report(
 class CodexBackend(Backend):
     name = "codex"
 
-    def __init__(self, model=None, sandbox="read-only", timeout=_UNSET, runner=run_process):
+    def __init__(self, model=None, sandbox="read-only", timeout=_UNSET,
+                 idle_timeout=_UNSET, runner=run_process):
         self.model = model
         self.sandbox = sandbox
         if timeout is _UNSET:
             configured = os.environ.get("AUTOPROF_CODEX_TIMEOUT")
             timeout = float(configured) if configured else DEFAULT_TIMEOUT_SECONDS
+        if idle_timeout is _UNSET:
+            configured = os.environ.get("AUTOPROF_CODEX_IDLE_TIMEOUT")
+            idle_timeout = float(configured) if configured else DEFAULT_IDLE_TIMEOUT_SECONDS
+        self.idle_timeout = idle_timeout
         # None means no wall-clock limit -- subprocess.run treats
         # timeout=None as "wait indefinitely", which is what we want.
         self.timeout = timeout
@@ -347,6 +358,8 @@ class CodexBackend(Backend):
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
+                    idle_timeout=self.idle_timeout,
+                    on_progress=opts.get("on_progress"),
                     input=prompt,
                     **({"env": child_env} if child_env is not None else {}),
                 )

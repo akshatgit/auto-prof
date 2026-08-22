@@ -741,6 +741,13 @@ CREATE TABLE jobs (
     -- so a long derivation isn't thrown away and re-paid for. NULL until
     -- a backend that supports sessions has run at least once.
     backend_session_id TEXT,
+    -- Evidence that a running job is doing work rather than hanging:
+    -- tokens the model actually produced, discrete items completed, and
+    -- when we last saw either. A long healthy job and a deadlocked one
+    -- are otherwise indistinguishable.
+    progress_at             TEXT,
+    progress_tokens         INTEGER,
+    progress_items          INTEGER,
 
     started_at      TEXT,   -- set when claimed (status -> running)
     completed_at    TEXT,   -- set when status -> done or failed (terminal)

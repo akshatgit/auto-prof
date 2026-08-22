@@ -199,6 +199,59 @@ def record_rate_limit(
     return True
 
 
+def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: float = 15.0):
+    """Return an on_progress callback that persists work evidence.
+
+    Writes are throttled: a chatty backend emits thousands of lines and the
+    point is a heartbeat, not a transaction per token. Uses its own
+    connection because the callback runs on the backend's reader thread
+    while the caller may be using `conn`.
+    """
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from .backends.progress import Progress
+
+    db_path = None
+    try:
+        for _, name, filename in conn.execute("PRAGMA database_list"):
+            if name == "main" and filename:
+                db_path = filename
+                break
+    except _sqlite3.Error:
+        db_path = None
+    if not db_path:
+        return None
+
+    progress = Progress()
+    state = {"last_write": 0.0}
+    lease_seconds = 1800
+
+    def record(_stream, chunk, _total):
+        progress.feed(chunk if isinstance(chunk, str) else chunk.decode("utf-8", "replace"))
+        now = _time.monotonic()
+        if now - state["last_write"] < every_seconds:
+            return
+        state["last_write"] = now
+        try:
+            side = _sqlite3.connect(db_path, timeout=5)
+            try:
+                side.execute(
+                    "UPDATE jobs SET progress_at = datetime('now'), progress_tokens = ?, "
+                    "progress_items = ?, lease_expires_at = datetime('now', ?) "
+                    "WHERE id = ? AND status = 'running'",
+                    (progress.produced_tokens, progress.items,
+                     f"+{lease_seconds} seconds", job_id),
+                )
+                side.commit()
+            finally:
+                side.close()
+        except _sqlite3.Error:
+            pass   # a heartbeat failing must never fail the research job
+
+    return record
+
+
 def run_with_session(conn: sqlite3.Connection, job_id: int, backend, prompt: str, **opts):
     """Call `backend` for `job_id`, carrying its backend session across attempts.
 
@@ -217,6 +270,11 @@ def run_with_session(conn: sqlite3.Connection, job_id: int, backend, prompt: str
     previous = row["backend_session_id"] if row is not None else None
     if previous:
         opts.setdefault("resume_session_id", previous)
+
+    # Report work as it happens, and extend the lease while it does. A job
+    # producing tokens is working however long it takes; the lease should
+    # not expire underneath it and invite a reclaim of live work.
+    opts.setdefault("on_progress", _progress_recorder(conn, job_id))
 
     result = backend.run(prompt, **opts)
 

@@ -35,6 +35,14 @@ def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 # does not belong here.
 _ADDITIVE_MIGRATIONS = (
     ("jobs", "backend_session_id", "TEXT"),
+    # Evidence that a running job is doing work, not hanging: tokens the
+    # model actually produced, discrete items completed, and when we last
+    # saw either. Without this a long healthy job and a deadlocked one look
+    # identical, and the only defence is a wall-clock kill that punishes
+    # both the same way.
+    ("jobs", "progress_at", "TEXT"),
+    ("jobs", "progress_tokens", "INTEGER"),
+    ("jobs", "progress_items", "INTEGER"),
     # JSON detail about an event. Added for escalation records, which
     # carry the failure class that stopped the job.
     ("events", "metadata", "TEXT"),

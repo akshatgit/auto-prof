@@ -99,6 +99,24 @@ def render_status(conn) -> str:
     for row in by_kind:
         out.append(f"  {row['kind']}: {row['status']} x{row['n']}")
 
+    # What each running job has actually produced. A long job and a hung one
+    # are indistinguishable without this, and the difference decides whether
+    # waiting is patience or a stall.
+    live = conn.execute(
+        "SELECT id, kind, target_id, started_at, progress_at, progress_tokens, "
+        "progress_items FROM jobs WHERE status='running' ORDER BY id"
+    ).fetchall()
+    for row in live:
+        if row["progress_at"]:
+            work = (f"{row['progress_tokens'] or 0} tokens, "
+                    f"{row['progress_items'] or 0} items, last seen {row['progress_at']}")
+        else:
+            work = "no output yet"
+        out.append(
+            f"  RUNNING job #{row['id']} ({row['kind']} -> {row['target_id']}) "
+            f"since {row['started_at']}: {work}"
+        )
+
     failed = conn.execute(
         "SELECT id, kind, last_error FROM jobs WHERE status='failed' ORDER BY id"
     ).fetchall()

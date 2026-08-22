@@ -139,3 +139,34 @@ class RenderBlockedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunningJobProgressTests(unittest.TestCase):
+    """Status must distinguish a working job from a hung one."""
+
+    def _job(self, conn, **kw):
+        cols = "kind,target_type,target_id,status,started_at"
+        vals = ["student_work", "task", 1, "running", "2026-08-22 10:00:00"]
+        for k, v in kw.items():
+            cols += "," + k
+            vals.append(v)
+        conn.execute(f"INSERT INTO jobs ({cols}) VALUES ({','.join('?' * len(vals))})", vals)
+        conn.commit()
+
+    def test_a_working_job_reports_tokens(self):
+        conn = fresh_db()
+        seed_lab_with_student(conn)
+        self._job(conn, progress_at="2026-08-22 10:05:00", progress_tokens=4210,
+                  progress_items=7)
+        out = render_status(conn)
+        self.assertIn("4210 tokens", out)
+        self.assertIn("7 items", out)
+        conn.close()
+
+    def test_a_silent_job_says_so(self):
+        conn = fresh_db()
+        seed_lab_with_student(conn)
+        self._job(conn)
+        out = render_status(conn)
+        self.assertIn("no output yet", out)
+        conn.close()

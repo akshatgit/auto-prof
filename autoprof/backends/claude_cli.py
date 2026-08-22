@@ -157,6 +157,8 @@ class ClaudeBackend(Backend):
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                idle_timeout=getattr(self, "idle_timeout", None),
+                on_progress=opts.get("on_progress"),
                 input=prompt,
             )
         except subprocess.TimeoutExpired as e:
