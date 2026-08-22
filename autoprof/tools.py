@@ -907,7 +907,22 @@ def run_record(body: str, db_path: str | None = None) -> dict:
     import os
     import sqlite3
 
-    name = (body or "").strip().splitlines()[0].strip().lower() if (body or "").strip() else ""
+    raw = (body or "").strip()
+    # Models reach for {"slice": "labs"} by analogy with the JSON-bodied
+    # tools and get a menu back instead of data. Task 39 burned six calls
+    # on this in one round. The intent is unambiguous, so accept it.
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("slice", "name", "query", "record"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw = value.strip()
+                    break
+    name = raw.splitlines()[0].strip().lower() if raw else ""
     if name not in RECORD_QUERIES:
         menu = "\n".join(f"  {key} -- {desc}" for key, (desc, _) in RECORD_QUERIES.items())
         return {

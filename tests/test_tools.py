@@ -940,3 +940,40 @@ class ToolCallCapTests(unittest.TestCase):
 
     def test_a_zero_or_negative_limit_still_runs_one(self):
         self.assertEqual(len(tools.parse_tool_calls(self._text(5), limit=0)), 1)
+
+
+class RecordArgumentFormTests(unittest.TestCase):
+    """A slice name wrapped in JSON is unambiguous; accept it."""
+
+    def _db(self):
+        import tempfile
+        from autoprof import db as db_module
+        d = tempfile.mkdtemp()
+        path = Path(d) / "r.db"
+        conn = db_module.connect(path)
+        db_module.ensure_initialized(conn)
+        conn.close()
+        return str(path)
+
+    def test_bare_name_still_works(self):
+        r = tools.run_record("labs", db_path=self._db())
+        self.assertEqual(r["status"], "ok")
+
+    def test_json_slice_form_is_accepted(self):
+        r = tools.run_record('{"slice": "labs"}', db_path=self._db())
+        self.assertEqual(r["status"], "ok")
+        self.assertNotIn("unknown slice", r["output"])
+
+    def test_other_obvious_keys_are_accepted(self):
+        for key in ("name", "query", "record"):
+            r = tools.run_record('{"%s": "jobs"}' % key, db_path=self._db())
+            self.assertEqual(r["status"], "ok", key)
+
+    def test_a_genuinely_unknown_slice_still_errors(self):
+        r = tools.run_record('{"slice": "nonsense"}', db_path=self._db())
+        self.assertEqual(r["status"], "error")
+        self.assertIn("unknown slice", r["output"])
+
+    def test_malformed_json_is_not_silently_accepted(self):
+        r = tools.run_record('{"slice": TRUNCATED', db_path=self._db())
+        self.assertEqual(r["status"], "error")
