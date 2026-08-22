@@ -227,10 +227,14 @@ class CodexBackendTests(unittest.TestCase):
         self.assertTrue(result.is_error)
         self.assertIn("timed out", result.error.lower())
 
-    def test_default_runner_is_subprocess_run(self):
-        # Sanity check the production default without actually invoking it.
+    def test_default_runner_group_kills_on_timeout(self):
+        # NOT subprocess.run: its timeout kills only the direct child and then
+        # blocks reading pipes a surviving grandchild still holds, which wedged
+        # the daemon for 42 minutes with no backend process alive.
+        from autoprof.backends.process import run_process
         backend = CodexBackend()
-        self.assertIs(backend.runner, subprocess.run)
+        self.assertIs(backend.runner, run_process)
+        self.assertIsNot(backend.runner, subprocess.run)
 
     def test_backend_name(self):
         self.assertEqual(CodexBackend().name, "codex")

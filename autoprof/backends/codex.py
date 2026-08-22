@@ -9,6 +9,8 @@ import json
 import os
 import re
 import subprocess
+
+from .process import run_process
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -284,7 +286,7 @@ def _write_diagnostic_report(
 class CodexBackend(Backend):
     name = "codex"
 
-    def __init__(self, model=None, sandbox="read-only", timeout=_UNSET, runner=subprocess.run):
+    def __init__(self, model=None, sandbox="read-only", timeout=_UNSET, runner=run_process):
         self.model = model
         self.sandbox = sandbox
         if timeout is _UNSET:

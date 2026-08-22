@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 
+from .process import run_process
+
 from .base import Backend, BackendResult
 
 # Same reasoning as the Codex backend: our own wall-clock ceiling is not
@@ -126,7 +128,7 @@ class ClaudeBackend(Backend):
         model=None,
         permission_mode="plan",
         timeout=_UNSET,
-        runner=subprocess.run,
+        runner=run_process,
     ):
         self.model = model or os.environ.get("AUTOPROF_CLAUDE_MODEL") or None
         self.permission_mode = permission_mode
