@@ -104,7 +104,7 @@ def render_status(conn) -> str:
     # waiting is patience or a stall.
     live = conn.execute(
         "SELECT id, kind, target_id, started_at, progress_at, progress_tokens, "
-        "progress_items FROM jobs WHERE status='running' ORDER BY id"
+        "progress_items, backend, backend_model FROM jobs WHERE status='running' ORDER BY id"
     ).fetchall()
     for row in live:
         if row["progress_at"]:
@@ -112,9 +112,12 @@ def render_status(conn) -> str:
                     f"{row['progress_items'] or 0} items, last seen {row['progress_at']}")
         else:
             work = "no output yet"
+        harness = row["backend"] or "?"
+        if row["backend_model"]:
+            harness += f"/{row['backend_model']}"
         out.append(
             f"  RUNNING job #{row['id']} ({row['kind']} -> {row['target_id']}) "
-            f"since {row['started_at']}: {work}"
+            f"on {harness} since {row['started_at']}: {work}"
         )
 
     failed = conn.execute(

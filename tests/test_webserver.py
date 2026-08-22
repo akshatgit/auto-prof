@@ -519,3 +519,80 @@ class JobsPageTests(unittest.TestCase):
 
     def test_page_refreshes_itself(self):
         self.assertIn("location.reload", webserver.render_jobs(self.conn))
+
+
+class JobDetailTests(unittest.TestCase):
+    """A read-only window on one job while it runs."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = Path(self.tmp.name) / "autoprof.db"
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _job(self, status="running", **kw):
+        cols = ["kind", "target_type", "target_id", "status"]
+        vals = ["student_work", "task", self.ids["task_id"], status]
+        for k, v in kw.items():
+            cols.append(k); vals.append(v)
+        cur = self.conn.execute(
+            f"INSERT INTO jobs ({','.join(cols)}) VALUES ({','.join('?' * len(vals))})", vals)
+        self.conn.commit()
+        return cur.lastrowid
+
+    def _log(self, job_id, text):
+        from autoprof.jobs import job_log_path
+        p = job_log_path(self.db_path, job_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def test_unknown_job_is_a_404(self):
+        self.assertIsNone(webserver.render_job_detail(self.conn, 9999, self.db_path))
+
+    def test_shows_harness_and_work(self):
+        jid = self._job(backend="codex", backend_model="gpt-5.5",
+                        progress_at="2026-08-22 10:05:00", progress_tokens=812,
+                        progress_items=3)
+        page = webserver.render_job_detail(self.conn, jid, self.db_path)
+        self.assertIn("codex", page)
+        self.assertIn("gpt-5.5", page)
+        self.assertIn("812 tokens", page)
+
+    def test_streams_the_log(self):
+        jid = self._job()
+        self._log(jid, '{"type":"item.completed"}\nworking on it\n')
+        page = webserver.render_job_detail(self.conn, jid, self.db_path)
+        self.assertIn("working on it", page)
+
+    def test_log_is_escaped(self):
+        jid = self._job()
+        self._log(jid, "<script>alert(1)</script>")
+        page = webserver.render_job_detail(self.conn, jid, self.db_path)
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;", page)
+
+    def test_missing_log_is_explained_not_crashed(self):
+        jid = self._job()
+        page = webserver.render_job_detail(self.conn, jid, self.db_path)
+        self.assertIn("No streamed output", page)
+
+    def test_running_job_refreshes_finished_one_does_not(self):
+        live = self._job(status="running")
+        done = self._job(status="done")
+        self.assertIn("location.reload", webserver.render_job_detail(self.conn, live, self.db_path))
+        self.assertNotIn("location.reload", webserver.render_job_detail(self.conn, done, self.db_path))
+
+    def test_large_log_is_tailed(self):
+        jid = self._job()
+        self._log(jid, "x" * (webserver.JOB_LOG_TAIL_BYTES + 5000))
+        page = webserver.render_job_detail(self.conn, jid, self.db_path)
+        self.assertIn("showing the last", page)
+
+    def test_route_registered_and_linked(self):
+        self.assertTrue(any(p.match("/jobs/12") for p, _ in webserver._ROUTES))
+        self._job(started_at="2026-08-22 10:00:00", backend="codex")
+        self.assertIn("/jobs/", webserver.render_jobs(self.conn))

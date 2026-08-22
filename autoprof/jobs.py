@@ -7,6 +7,7 @@ subprocess or the network.
 """
 
 import sqlite3
+from pathlib import Path
 
 from . import recovery
 from .events import record_job_event
@@ -199,6 +200,21 @@ def record_rate_limit(
     return True
 
 
+# A live window on a running job, not an archive: enough to see what it is
+# doing now, capped so a chatty backend cannot fill the disk.
+JOB_LOG_MAX_BYTES = 2_000_000
+
+
+def job_log_path(db_path, job_id: int) -> Path:
+    """Where a running job's streamed output is tailed from.
+
+    Beside the database rather than in lab_dir: the writer is
+    run_with_session, which knows the connection but not which lab it is
+    serving.
+    """
+    return Path(db_path).parent / "joblogs" / f"{job_id}.log"
+
+
 def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: float = 15.0):
     """Return an on_progress callback that persists work evidence.
 
@@ -227,8 +243,26 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
     state = {"last_write": 0.0}
     lease_seconds = 1800
 
+    # Stream the job's output to a file so a read-only view can tail it
+    # while the job runs. Capped: this is a live window, not an archive --
+    # the durable record is the artifact the handler writes on completion.
+    log_path = job_log_path(db_path, job_id)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("")
+    except OSError:
+        log_path = None
+
     def record(_stream, chunk, _total):
-        progress.feed(chunk if isinstance(chunk, str) else chunk.decode("utf-8", "replace"))
+        text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", "replace")
+        progress.feed(text)
+        if log_path is not None:
+            try:
+                if log_path.exists() and log_path.stat().st_size < JOB_LOG_MAX_BYTES:
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(text)
+            except OSError:
+                pass
         now = _time.monotonic()
         if now - state["last_write"] < every_seconds:
             return

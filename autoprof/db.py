@@ -40,6 +40,8 @@ _ADDITIVE_MIGRATIONS = (
     # saw either. Without this a long healthy job and a deadlocked one look
     # identical, and the only defence is a wall-clock kill that punishes
     # both the same way.
+    ("jobs", "backend", "TEXT"),
+    ("jobs", "backend_model", "TEXT"),
     ("jobs", "progress_at", "TEXT"),
     ("jobs", "progress_tokens", "INTEGER"),
     ("jobs", "progress_items", "INTEGER"),

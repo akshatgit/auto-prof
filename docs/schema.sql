@@ -745,6 +745,11 @@ CREATE TABLE jobs (
     -- tokens the model actually produced, discrete items completed, and
     -- when we last saw either. A long healthy job and a deadlocked one
     -- are otherwise indistinguishable.
+    -- Which harness actually ran this job, recorded at dispatch. Without
+    -- it a running job says nothing about what is doing the work, and
+    -- model_version only appears after the job finishes.
+    backend                 TEXT,
+    backend_model           TEXT,
     progress_at             TEXT,
     progress_tokens         INTEGER,
     progress_items          INTEGER,

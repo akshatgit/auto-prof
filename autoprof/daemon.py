@@ -141,6 +141,25 @@ def _job_lab_id(conn: sqlite3.Connection, row) -> int | None:
     return owner["lab_id"] if owner else None
 
 
+def _record_backend(conn: sqlite3.Connection, job_id: int, backend) -> None:
+    """Note which harness is running a job, as it starts.
+
+    `model_version` is only written when a job COMPLETES, so a running job
+    said nothing about what was working on it -- the Jobs view could show
+    tokens accumulating with no indication of whether codex, claude or
+    ollama produced them.
+    """
+    model = getattr(backend, "model", None)
+    try:
+        conn.execute(
+            "UPDATE jobs SET backend = ?, backend_model = ? WHERE id = ?",
+            (getattr(backend, "name", None), str(model) if model else None, job_id),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        pass    # bookkeeping must never stop the job
+
+
 def _execute_one(
     db_path, job_id: int, kind: str, registry, prompt_builders, lab_dir, special_handlers,
     reviewer_index: int | None = None,
@@ -166,6 +185,8 @@ def _execute_one(
 
         if _provider_blocked(conn, backend.name):
             return "not_claimed"
+
+        _record_backend(conn, job_id, backend)
 
         handler = special_handlers.get(kind)
         if handler is not None:
@@ -308,6 +329,8 @@ def dispatch_pending_jobs(
 
         if _provider_blocked(conn, backend.name):
             continue
+
+        _record_backend(conn, candidate["id"], backend)
 
         handler = special_handlers.get(candidate["kind"])
         if handler is not None:

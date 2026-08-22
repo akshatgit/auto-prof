@@ -137,7 +137,7 @@ def render_jobs(conn: sqlite3.Connection) -> str:
     """
     running = conn.execute(
         "SELECT id, kind, target_type, target_id, started_at, lease_expires_at, "
-        "progress_at, progress_tokens, progress_items, attempts "
+        "progress_at, progress_tokens, progress_items, attempts, backend, backend_model "
         "FROM jobs WHERE status = 'running' ORDER BY id"
     ).fetchall()
 
@@ -149,15 +149,19 @@ def render_jobs(conn: sqlite3.Connection) -> str:
                     f"<br><span class='muted'>last output {_e(r['progress_at'])}</span>")
         else:
             work = "<span class='work stale'>no output yet</span>"
+        harness = _e(r["backend"] or "?")
+        if r["backend_model"]:
+            harness += f"<br><span class='muted'>{_e(r['backend_model'])}</span>"
         rows.append(
-            f"<tr><td>#{r['id']}</td><td>{_e(r['kind'])}</td>"
+            f"<tr><td><a href='/jobs/{r['id']}'>#{r['id']}</a></td><td>{_e(r['kind'])}</td>"
             f"<td>{_e(r['target_type'])} {r['target_id']}</td>"
+            f"<td class='work'>{harness}</td>"
             f"<td class='muted'>{_e(r['started_at'])}</td>"
             f"<td>{work}</td></tr>"
         )
     running_table = (
-        "<table><tr><th>job</th><th>kind</th><th>target</th><th>started</th>"
-        f"<th>work produced</th></tr>{''.join(rows)}</table>"
+        "<table><tr><th>job</th><th>kind</th><th>target</th><th>harness</th>"
+        f"<th>started</th><th>work produced</th></tr>{''.join(rows)}</table>"
         if rows else "<p class='muted'>Nothing running.</p>"
     )
 
@@ -183,7 +187,8 @@ def render_jobs(conn: sqlite3.Connection) -> str:
         "WHERE status = 'failed' ORDER BY id DESC LIMIT 15"
     ).fetchall()
     fail_rows = "".join(
-        f"<tr><td>#{f['id']}</td><td>{_e(f['kind'])}</td><td>{f['target_id']}</td>"
+        f"<tr><td><a href='/jobs/{f['id']}'>#{f['id']}</a></td><td>{_e(f['kind'])}</td>"
+        f"<td>{f['target_id']}</td>"
         f"<td class='muted'>{_e((f['err'] or '').splitlines()[0] if f['err'] else '')}</td></tr>"
         for f in failed
     )
@@ -203,6 +208,75 @@ def render_jobs(conn: sqlite3.Connection) -> str:
         "<script>setTimeout(function(){ location.reload(); }, 10000);</script>"
     )
     return _PAGE.format(title="autoprof — Jobs", body=body)
+
+
+JOB_LOG_TAIL_BYTES = 200_000
+
+
+def render_job_detail(conn: sqlite3.Connection, job_id: int, db_path=None) -> str | None:
+    """Read-only live view of one job: what it is, and what it is emitting.
+
+    The log is the backend's own stream, tailed while the job runs. It is a
+    window, not the record of results -- handlers still write artifacts on
+    completion.
+    """
+    job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        return None
+
+    def cell(name, value):
+        return f"<tr><td>{name}</td><td class='work'>{_e(value)}</td></tr>"
+
+    harness = job["backend"] or "?"
+    if job["backend_model"]:
+        harness += f" / {job['backend_model']}"
+    produced = (
+        f"{job['progress_tokens'] or 0} tokens, {job['progress_items'] or 0} items"
+        if job["progress_at"] else "no output recorded"
+    )
+    meta = "".join([
+        cell("kind", job["kind"]),
+        cell("target", f"{job['target_type']} {job['target_id']}"),
+        cell("status", job["status"]),
+        cell("harness", harness),
+        cell("started", job["started_at"] or "-"),
+        cell("last output", job["progress_at"] or "-"),
+        cell("work produced", produced),
+        cell("attempts", job["attempts"]),
+        cell("session", job["backend_session_id"] or "-"),
+    ])
+
+    text = ""
+    note = ""
+    if db_path is not None:
+        from .jobs import job_log_path
+        path = job_log_path(db_path, job_id)
+        try:
+            if path.is_file():
+                size = path.stat().st_size
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    if size > JOB_LOG_TAIL_BYTES:
+                        handle.seek(size - JOB_LOG_TAIL_BYTES)
+                        note = (f"<p class='muted'>showing the last "
+                                f"{JOB_LOG_TAIL_BYTES // 1000}KB of {size // 1000}KB</p>")
+                    text = handle.read()
+        except OSError as e:
+            note = f"<p class='muted'>log unavailable: {_e(e)}</p>"
+
+    if not text.strip():
+        stream = ("<p class='muted'>No streamed output. Jobs record this only while "
+                  "running, and only for backends that stream.</p>")
+    else:
+        stream = f"<pre class='tool-payload'>{_e(text)}</pre>"
+
+    refresh = ("<script>setTimeout(function(){ location.reload(); }, 5000);</script>"
+               if job["status"] == "running" else "")
+    body = (
+        f"<p><a href='/jobs'>&larr; jobs</a></p><h1>Job #{job_id}</h1>"
+        f"<table>{meta}</table>"
+        f"<h2>Live output</h2>{note}{stream}{refresh}"
+    )
+    return _PAGE.format(title=f"autoprof — job {job_id}", body=body)
 
 
 def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
@@ -813,6 +887,8 @@ def render_supervision(conn: sqlite3.Connection, task_id: int, round_: int, lab_
 _ROUTES = [
     (re.compile(r"^/$"), lambda conn, m, d: render_lab_list(conn)),
     (re.compile(r"^/jobs$"), lambda conn, m, d: render_jobs(conn)),
+    (re.compile(r"^/jobs/(\d+)$"),
+     lambda conn, m, d: render_job_detail(conn, int(m.group(1)), _DB_PATH.get("path"))),
     (re.compile(r"^/labs/(\d+)$"), lambda conn, m, d: render_lab_detail(conn, int(m.group(1)))),
     (re.compile(r"^/students/(\d+)$"), lambda conn, m, d: render_student_detail(conn, int(m.group(1)))),
     (re.compile(r"^/professors/(\d+)$"), lambda conn, m, d: render_professor_detail(conn, int(m.group(1)))),
@@ -828,7 +904,11 @@ _ROUTES = [
 ]
 
 
+_DB_PATH: dict = {}
+
+
 def make_server(db_path, host: str = "127.0.0.1", port: int = 8765, lab_dir=None) -> HTTPServer:
+    _DB_PATH["path"] = db_path
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # keep test/CLI output quiet; not a design decision worth a knob yet
