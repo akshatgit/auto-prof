@@ -6,6 +6,7 @@ Kept separate so this state machine is testable without ever touching a
 subprocess or the network.
 """
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -200,6 +201,18 @@ def record_rate_limit(
     return True
 
 
+# Rust `tracing` lines: an ISO timestamp then a level. With
+# AUTOPROF_CODEX_RUST_LOG set to trace these are 94% of a job's output --
+# 809 of 864 lines in one measured job -- and they bury the 20 lines that
+# say what the model actually did.
+_TRACE_LINE = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(TRACE|DEBUG)\s")
+
+
+def is_noise(line: str) -> bool:
+    """True for backend framework logging that hides the actual work."""
+    return bool(_TRACE_LINE.match(line.lstrip()))
+
+
 # A live window on a running job, not an archive: enough to see what it is
 # doing now, capped so a chatty backend cannot fill the disk.
 JOB_LOG_MAX_BYTES = 2_000_000
@@ -253,10 +266,25 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
     except OSError:
         log_path = None
 
+    def write_now():
+        try:
+            side = _sqlite3.connect(db_path, timeout=5)
+            try:
+                side.execute(
+                    "UPDATE jobs SET progress_at = datetime('now'), progress_tokens = ?, "
+                    "progress_items = ? WHERE id = ?",
+                    (progress.produced_tokens, progress.items, job_id),
+                )
+                side.commit()
+            finally:
+                side.close()
+        except _sqlite3.Error:
+            pass
+
     def record(_stream, chunk, _total):
         text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", "replace")
         progress.feed(text)
-        if log_path is not None:
+        if log_path is not None and not is_noise(text):
             try:
                 if log_path.exists() and log_path.stat().st_size < JOB_LOG_MAX_BYTES:
                     with log_path.open("a", encoding="utf-8") as handle:
@@ -283,6 +311,12 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
         except _sqlite3.Error:
             pass   # a heartbeat failing must never fail the research job
 
+    # Codex reports token usage only at `turn.completed`, which lands at the
+    # very end of a call -- the throttle above then skips it and the finished
+    # job keeps whatever stale count the last heartbeat wrote, usually zero.
+    # The flush is what makes the final number true.
+    record.flush = write_now
+    record.progress = progress
     return record
 
 
@@ -311,6 +345,11 @@ def run_with_session(conn: sqlite3.Connection, job_id: int, backend, prompt: str
     opts.setdefault("on_progress", _progress_recorder(conn, job_id))
 
     result = backend.run(prompt, **opts)
+
+    recorder = opts.get("on_progress")
+    flush = getattr(recorder, "flush", None)
+    if callable(flush):
+        flush()
 
     session_id = getattr(result, "session_id", None)
     if session_id and session_id != previous:

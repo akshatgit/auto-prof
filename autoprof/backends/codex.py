@@ -319,15 +319,25 @@ class CodexBackend(Backend):
             # mocked tests could not catch because they validated the
             # command we intended rather than one Codex accepts.
             resuming = bool(resume_session_id)
+            sandbox = opts.get("sandbox", self.sandbox)
+            cwd = opts.get("cwd")
             cmd = ["codex", "exec"]
             if resuming:
                 cmd += ["resume", resume_session_id]
             cmd += ["--skip-git-repo-check", "--json"]
             if not resuming:
-                cmd += ["--sandbox", opts.get("sandbox", self.sandbox), "-o", str(out_path)]
-                cwd = opts.get("cwd")
+                cmd += ["--sandbox", sandbox, "-o", str(out_path)]
                 if cwd:
                     cmd += ["-C", str(cwd)]
+            else:
+                # `codex exec resume` accepts neither --sandbox nor -C, so a
+                # resumed session silently fell back to codex's own default:
+                # read-only, in the DAEMON's directory. Every attempt after
+                # the first therefore lost Docker and lost the workspace,
+                # and the student truthfully reported both as unavailable.
+                # -c restores the sandbox; the child's own cwd restores the
+                # directory, since -C is unavailable here.
+                cmd += ["-c", f'sandbox_mode="{sandbox}"']
             model = opts.get("model", self.model)
             if model:
                 cmd += ["--model", model]
@@ -361,6 +371,7 @@ class CodexBackend(Backend):
                     idle_timeout=self.idle_timeout,
                     on_progress=opts.get("on_progress"),
                     input=prompt,
+                    **({"cwd": str(cwd)} if cwd else {}),
                     **({"env": child_env} if child_env is not None else {}),
                 )
             except subprocess.TimeoutExpired as e:

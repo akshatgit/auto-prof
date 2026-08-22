@@ -521,3 +521,50 @@ class StaleSessionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertTrue(result.error)
+
+
+class ResumeKeepsSandboxAndCwdTests(unittest.TestCase):
+    """A resumed session must not silently lose its privileges."""
+
+    def _capture(self):
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                '{"type":"thread.started","thread_id":"t"}\n'
+                '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n', "")
+
+        return calls, runner
+
+    def test_fresh_session_uses_sandbox_and_C_flags(self):
+        calls, runner = self._capture()
+        CodexBackend(runner=runner).run("p", sandbox="danger-full-access", cwd="/ws")
+        cmd = calls[0][0]
+        self.assertIn("--sandbox", cmd)
+        self.assertIn("danger-full-access", cmd)
+        self.assertIn("-C", cmd)
+
+    def test_resume_restores_the_sandbox_via_config_override(self):
+        # codex exec resume rejects --sandbox, so it must arrive as -c.
+        calls, runner = self._capture()
+        CodexBackend(runner=runner).run(
+            "p", sandbox="danger-full-access", cwd="/ws", resume_session_id="abc")
+        cmd = calls[0][0]
+        self.assertIn("resume", cmd)
+        self.assertNotIn("--sandbox", cmd)
+        self.assertIn("-c", cmd)
+        self.assertIn('sandbox_mode="danger-full-access"', cmd)
+
+    def test_resume_runs_the_child_in_the_workspace(self):
+        # -C is unavailable on resume; the child's own cwd carries it.
+        calls, runner = self._capture()
+        CodexBackend(runner=runner).run(
+            "p", sandbox="danger-full-access", cwd="/ws", resume_session_id="abc")
+        self.assertEqual(calls[0][1].get("cwd"), "/ws")
+
+    def test_fresh_session_also_runs_in_the_workspace(self):
+        calls, runner = self._capture()
+        CodexBackend(runner=runner).run("p", sandbox="workspace-write", cwd="/ws")
+        self.assertEqual(calls[0][1].get("cwd"), "/ws")

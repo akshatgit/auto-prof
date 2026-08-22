@@ -1,5 +1,7 @@
 import json
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from autoprof import jobs, recovery
 from autoprof.backends.base import BackendResult
@@ -458,3 +460,41 @@ class EscalationEventTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgressFlushTests(unittest.TestCase):
+    """The finished token count must be written, not lost to the throttle."""
+
+    def test_final_usage_is_persisted_after_the_call(self):
+        import tempfile
+        from autoprof import db as db_module, jobs as jobs_module
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "a.db"
+            conn = db_module.connect(path)
+            db_module.ensure_initialized(conn)
+            ids = seed_lab_with_student(conn)
+            cur = conn.execute(
+                "INSERT INTO jobs (kind, target_type, target_id, status) "
+                "VALUES ('student_work','task',?, 'running')", (ids["task_id"],))
+            job_id = cur.lastrowid
+            conn.commit()
+
+            class B:
+                name = "codex"
+
+                def run(self, prompt, **opts):
+                    cb = opts["on_progress"]
+                    # usage arrives only at the very end, inside the throttle window
+                    cb("stdout", '{"type":"item.completed","item":{}}\n', 1)
+                    cb("stdout", '{"type":"turn.completed","usage":'
+                                 '{"output_tokens":300,"reasoning_output_tokens":45}}\n', 2)
+                    return SimpleNamespace(session_id=None)
+
+            jobs_module.run_with_session(conn, job_id, B(), "p")
+            row = conn.execute(
+                "SELECT progress_tokens, progress_items FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            self.assertEqual(row["progress_tokens"], 345)
+            self.assertEqual(row["progress_items"], 1)
+            conn.close()
