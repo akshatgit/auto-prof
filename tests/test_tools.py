@@ -977,3 +977,35 @@ class RecordArgumentFormTests(unittest.TestCase):
     def test_malformed_json_is_not_silently_accepted(self):
         r = tools.run_record('{"slice": TRUNCATED', db_path=self._db())
         self.assertEqual(r["status"], "error")
+
+
+class UnopenedToolFenceTests(unittest.TestCase):
+    """minimax-m3 emits the closing fence but not the opening one."""
+
+    def test_unopened_block_is_executed(self):
+        text = 'tool:shell\ncd task37 && python3 -m run_validation\n```'
+        self.assertEqual(
+            tools.parse_tool_calls(text),
+            [("shell", "cd task37 && python3 -m run_validation")],
+        )
+
+    def test_call_after_prose_is_found(self):
+        text = "Here is my plan.\n\ntool:readfile\ndocs/x.md\n```"
+        self.assertEqual(tools.parse_tool_calls(text), [("readfile", "docs/x.md")])
+
+    def test_prose_mentioning_a_tool_is_not_executed(self):
+        self.assertEqual(tools.parse_tool_calls("I would use tool:shell here."), [])
+
+    def test_missing_closing_fence_is_not_executed(self):
+        self.assertEqual(tools.parse_tool_calls("tool:shell\nrm -rf /"), [])
+
+    def test_unknown_tool_name_is_not_executed(self):
+        self.assertEqual(tools.parse_tool_calls("tool:banana\necho hi\n```"), [])
+
+    def test_properly_fenced_blocks_are_not_double_counted(self):
+        text = "```tool:shell\necho a\n```\n\n```tool:shell\necho b\n```"
+        self.assertEqual(tools.count_tool_calls(text), 2)
+
+    def test_a_tool_name_inside_a_fenced_body_is_not_a_second_call(self):
+        text = '```tool:shell\ngrep -n "tool:shell" x.py\n```'
+        self.assertEqual(tools.count_tool_calls(text), 1)
