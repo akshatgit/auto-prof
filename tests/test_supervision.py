@@ -489,3 +489,37 @@ class ResubmitGuardTests(unittest.TestCase):
     def test_an_accepted_paper_does_not_block_a_later_ready(self):
         self._paper("accepted")
         self.assertEqual(self._run_ready(), "ready")
+
+
+class OperatorNotesTests(unittest.TestCase):
+    """Operator instructions must survive the student rewriting its memory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+        self.path = self.lab_dir / "9" / "tasks" / "35" / "OPERATOR_NOTES.md"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def test_absent_file_yields_nothing(self):
+        self.assertEqual(supervision.render_operator_notes(self.lab_dir, 9, 35), "")
+
+    def test_empty_file_yields_nothing(self):
+        self.path.write_text("   \n")
+        self.assertEqual(supervision.render_operator_notes(self.lab_dir, 9, 35), "")
+
+    def test_contents_are_rendered_with_precedence_stated(self):
+        self.path.write_text("Run the v5 campaign before writing.")
+        out = supervision.render_operator_notes(self.lab_dir, 9, 35)
+        self.assertIn("Run the v5 campaign", out)
+        self.assertIn("outrank", out)
+        self.assertIn("cannot edit them", out)
+
+    def test_notes_are_per_task(self):
+        self.path.write_text("for task 35")
+        self.assertEqual(supervision.render_operator_notes(self.lab_dir, 9, 36), "")
+
+    def test_prompt_templates_carry_the_slot(self):
+        from autoprof import paper
+        self.assertIn("{operator_notes}", paper.WORK_PROMPT_TEMPLATE)
+        self.assertIn("{operator_notes}", paper.PAPER_PROMPT_TEMPLATE)

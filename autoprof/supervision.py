@@ -114,6 +114,37 @@ student should do next (for "ready", what they must be careful to include when w
 """
 
 
+def render_operator_notes(lab_dir, lab_id: int, task_id: int) -> str:
+    """Standing instructions from the human operator, injected every round.
+
+    Operator notes used to be appended to the student's memory.md. That does
+    not work: memory.md is REPLACED WHOLESALE by the student each round, so
+    every instruction was erased on the next write. Three directives were lost
+    that way, and the task drifted back to the bookkeeping they were written
+    to stop.
+
+    This file is written by the operator and only ever READ here, so it
+    survives the student's own writes and reaches every subsequent round.
+    """
+    path = Path(lab_dir) / str(lab_id) / "tasks" / str(task_id) / "OPERATOR_NOTES.md"
+    try:
+        if not path.is_file():
+            return ""
+        text = path.read_text(errors="replace").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    return (
+        "<operator_notes>\n"
+        "Standing instructions from the human operator who commissioned this lab. "
+        "These outrank your own plan and your memory. They are not part of your "
+        "memory and you cannot edit them; if one conflicts with a note you wrote "
+        "yourself, the operator's instruction governs.\n\n"
+        + text + "\n</operator_notes>"
+    )
+
+
 def render_prior_reviews(
     conn: sqlite3.Connection, task_id: int, lab_dir: Path, excerpt: int = 1800
 ) -> str:

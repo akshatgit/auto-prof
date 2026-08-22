@@ -70,6 +70,8 @@ Your working memory so far:
 {memory}
 </memory>
 
+{operator_notes}
+
 {supervision}
 
 {corpus}
@@ -118,6 +120,8 @@ Your complete working memory from doing the research:
 <memory>
 {memory}
 </memory>
+
+{operator_notes}
 
 {supervision}
 
@@ -304,6 +308,7 @@ def execute_student_work_job(
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             memory=memory,
+            operator_notes=supervision.render_operator_notes(lab_dir, lab["id"], task["id"]),
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
             corpus=ingest.render_corpus(conn, lab["id"], lab_dir),
             tool_docs=tools.render_tool_docs(),
@@ -532,6 +537,7 @@ def execute_student_write_paper_job(
             direction=task["direction"],
             end_criteria=task["end_criteria"],
             memory=memory,
+            operator_notes=supervision.render_operator_notes(lab_dir, lab["id"], task["id"]),
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
             reference_bank=references.render_for_prompt(conn),
             template=template,
