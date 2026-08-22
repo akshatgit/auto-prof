@@ -51,6 +51,19 @@ class Progress:
             return
         if not isinstance(event, dict):
             return
+        # Ollama's generate stream: one object per token batch, counters on
+        # the last. It reports continuously rather than only at turn close,
+        # so an ollama job shows real numbers throughout instead of nothing.
+        if "type" not in event and ("response" in event or "eval_count" in event):
+            if event.get("response"):
+                self.items += 1     # a token batch is the unit of work here
+            if event.get("done"):
+                self.turns += 1
+                self.output_tokens += int(event.get("eval_count") or 0)
+                self.input_tokens += int(event.get("prompt_eval_count") or 0)
+                self.last_event = "done"
+            return
+
         kind = event.get("type")
         if isinstance(kind, str):
             self.last_event = kind

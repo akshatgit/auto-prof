@@ -130,3 +130,62 @@ class OllamaCloudBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreamingProgressTests(unittest.TestCase):
+    """An ollama job must be able to show that it is working."""
+
+    def _backend(self, stream_lines):
+        b = OllamaCloudBackend(api_key="k", model="m")
+
+        def fake_stream(url, headers, body, timeout, on_chunk):
+            for line in stream_lines:
+                on_chunk(line + "\n")
+            return 200, {}, ("\n".join(stream_lines)).encode()
+
+        b.stream_call = fake_stream
+        b.http_call = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("non-streaming path used despite a progress callback"))
+        return b
+
+    def test_streams_when_a_progress_callback_is_given(self):
+        seen = []
+        lines = [json.dumps({"model": "m", "response": "Hel", "done": False}),
+                 json.dumps({"model": "m", "response": "lo", "done": False}),
+                 json.dumps({"model": "m", "response": "", "done": True,
+                             "eval_count": 12, "prompt_eval_count": 300})]
+        r = self._backend(lines).run("p", on_progress=lambda s, c, n: seen.append(c))
+        self.assertEqual(r.text, "Hello")
+        self.assertEqual(len(seen), 3)
+
+    def test_request_body_asks_for_streaming_only_when_watched(self):
+        captured = {}
+
+        def fake_stream(url, headers, body, timeout, on_chunk):
+            captured["body"] = json.loads(body)
+            on_chunk(json.dumps({"response": "x", "done": True, "eval_count": 1}))
+            return 200, {}, json.dumps({"response": "x", "done": True}).encode()
+
+        b = OllamaCloudBackend(api_key="k", model="m")
+        b.stream_call = fake_stream
+        b.run("p", on_progress=lambda *a: None)
+        self.assertTrue(captured["body"]["stream"])
+
+    def test_without_a_callback_it_stays_non_streaming(self):
+        captured = {}
+
+        def fake_http(url, headers, body, timeout):
+            captured["body"] = json.loads(body)
+            return 200, {}, json.dumps({"response": "ok", "model": "m"}).encode()
+
+        b = OllamaCloudBackend(api_key="k", model="m")
+        b.http_call = fake_http
+        r = b.run("p")
+        self.assertFalse(captured["body"]["stream"])
+        self.assertEqual(r.text, "ok")
+
+    def test_a_broken_callback_does_not_fail_the_job(self):
+        lines = [json.dumps({"response": "a", "done": True, "eval_count": 2})]
+        b = self._backend(lines)
+        r = b.run("p", on_progress=lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+        self.assertEqual(r.text, "a")

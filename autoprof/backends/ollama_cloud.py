@@ -13,6 +13,37 @@ import urllib.request
 from .base import Backend, BackendResult
 
 
+def _join_stream(body) -> dict:
+    """Collapse an NDJSON generate stream into the single object the
+    non-streaming path returns.
+
+    Ollama emits one object per token batch, each carrying a `response`
+    fragment, and a final object with the counters. Concatenating the
+    fragments reproduces the whole completion; the last object supplies
+    `model`, `eval_count` (tokens generated) and `prompt_eval_count`.
+    """
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    text, final = [], {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        text.append(event.get("response") or "")
+        final = event
+    if not final:
+        raise json.JSONDecodeError("no JSON objects in stream", str(body)[:200], 0)
+    merged = dict(final)
+    merged["response"] = "".join(text)
+    return merged
+
+
 class OllamaCloudBackend(Backend):
     name = "ollama_cloud"
 
@@ -44,13 +75,23 @@ class OllamaCloudBackend(Backend):
                 timeout = self.DEFAULT_TIMEOUT_SECONDS
         self.timeout = timeout
         self.http_call = http_call or self._real_http_call
+        self.stream_call = self._real_stream_call
 
     def run(self, prompt: str, **opts) -> BackendResult:
         if not self.api_key:
             return BackendResult(text="", error="OLLAMA_API_KEY is not set")
 
         model = opts.get("model", self.model)
-        body = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+        # Stream only when someone is watching. A non-streaming POST returns
+        # nothing until the whole generation is done, so an ollama job was
+        # indistinguishable from a hung one for its entire life -- it reported
+        # 0 tokens and 0 items no matter how much work it did, and the stall
+        # detector flagged healthy jobs.
+        on_progress = opts.get("on_progress")
+        streaming = callable(on_progress) and self.stream_call is not None
+        body = json.dumps(
+            {"model": model, "prompt": prompt, "stream": bool(streaming)}
+        ).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -58,7 +99,21 @@ class OllamaCloudBackend(Backend):
         url = f"{self.host}/api/generate"
 
         try:
-            status, resp_headers, resp_body = self.http_call(url, headers, body, self.timeout)
+            if streaming:
+                def _report(line):
+                    # Guard here rather than in the stream implementation, so
+                    # the promise "a reporting bug cannot fail a research job"
+                    # holds whichever implementation is in use.
+                    try:
+                        on_progress("stdout", line, 0)
+                    except Exception:   # noqa: BLE001
+                        pass
+
+                status, resp_headers, resp_body = self.stream_call(
+                    url, headers, body, self.timeout, _report)
+            else:
+                status, resp_headers, resp_body = self.http_call(
+                    url, headers, body, self.timeout)
         except TimeoutError:
             return BackendResult(text="", error=f"ollama cloud request timed out after {self.timeout}s")
         except OSError as e:
@@ -81,7 +136,9 @@ class OllamaCloudBackend(Backend):
             return BackendResult(text="", error=f"ollama cloud returned HTTP {status}: {snippet}")
 
         try:
-            parsed = json.loads(resp_body)
+            parsed = (
+                _join_stream(resp_body) if streaming else json.loads(resp_body)
+            )
         except json.JSONDecodeError:
             snippet = resp_body[:500] if isinstance(resp_body, (bytes, str)) else resp_body
             return BackendResult(text="", error=f"ollama cloud returned non-JSON response: {snippet}")
@@ -91,6 +148,28 @@ class OllamaCloudBackend(Backend):
             model_version=parsed.get("model", model),
             raw=parsed,
         )
+
+    @staticmethod
+    def _real_stream_call(url, headers, body, timeout, on_chunk):
+        """POST and read the NDJSON stream, reporting each line as it lands.
+
+        Returns (status, headers, joined_body) so the caller can parse the
+        result exactly as it does a non-streaming reply.
+        """
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                lines = []
+                for raw in resp:
+                    line = raw.decode("utf-8", "replace")
+                    lines.append(line)
+                    try:
+                        on_chunk(line)
+                    except Exception:   # noqa: BLE001 -- reporting must not fail the job
+                        pass
+                return resp.status, dict(resp.headers), "".join(lines).encode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers or {}), e.read()
 
     @staticmethod
     def _real_http_call(url, headers, body, timeout):
