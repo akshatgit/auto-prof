@@ -532,3 +532,29 @@ class ReviseWorkspaceAccessTests(unittest.TestCase):
     def test_revise_prompt_tells_the_student_it_may_fix_the_artifact(self):
         src = Path("autoprof/paper.py").read_text()
         self.assertIn("fix the artifact and re-run it", src)
+
+
+class NoJobRunsInTheDaemonsDirectoryTests(unittest.TestCase):
+    """No handler may leave Codex inheriting the orchestrator's own cwd.
+
+    A write-paper job with no cwd wrote 655MB of research into auto-prof's
+    source tree and broke test collection.
+    """
+
+    def test_every_codex_call_site_sets_a_cwd(self):
+        src = Path("autoprof/paper.py").read_text()
+        for name in (
+            "execute_student_write_paper_job",
+            "execute_collaboration_write_paper_job",
+            "execute_student_revise_paper_job",
+        ):
+            start = src.index(f"def {name}(")
+            end = src.find("\ndef ", start + 10)
+            body = src[start:] if end == -1 else src[start:end]
+            self.assertIn("evidence_cwd_options", body, name)
+
+    def test_write_paper_is_read_only(self):
+        src = Path("autoprof/paper.py").read_text()
+        start = src.index("def execute_student_write_paper_job(")
+        end = src.find("\ndef ", start + 10)
+        self.assertNotIn("writable=True", src[start:end])

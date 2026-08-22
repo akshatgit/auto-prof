@@ -918,3 +918,25 @@ class CommitWorkspaceTests(unittest.TestCase):
     def test_lab_without_workspace_is_skipped(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(tools.commit_workspace(9, "m")["status"], "skipped")
+
+
+class ToolCallCapTests(unittest.TestCase):
+    """Extra calls must be countable, not silently vanish."""
+
+    def _text(self, n):
+        return "\n".join(f"```tool:verify\nprint({i})\n```" for i in range(n))
+
+    def test_default_cap_is_eight(self):
+        self.assertEqual(len(tools.parse_tool_calls(self._text(12))), 8)
+
+    def test_explicit_limit_is_honoured(self):
+        self.assertEqual(len(tools.parse_tool_calls(self._text(12), limit=3)), 3)
+
+    def test_count_reports_the_pre_cap_total(self):
+        self.assertEqual(tools.count_tool_calls(self._text(12)), 12)
+
+    def test_count_matches_when_under_the_cap(self):
+        self.assertEqual(tools.count_tool_calls(self._text(2)), 2)
+
+    def test_a_zero_or_negative_limit_still_runs_one(self):
+        self.assertEqual(len(tools.parse_tool_calls(self._text(5), limit=0)), 1)

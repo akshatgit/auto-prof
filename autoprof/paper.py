@@ -355,9 +355,15 @@ def execute_student_work_job(
     # spend a job cycling on tools instead of producing work.
     prompt_so_far = work_prompt
     for _ in range(config.max_tool_rounds(lab_id=lab["id"])):
-        calls = tools.parse_tool_calls(result.text)
+        call_cap = config.max_tool_calls_per_round(lab_id=lab["id"])
+        calls = tools.parse_tool_calls(result.text, limit=call_cap)
         if not calls:
             break
+        # Say so when we drop calls. Silently discarding them made a student
+        # re-request the missing ones next round, which is how the round
+        # budget got exhausted.
+        requested = tools.count_tool_calls(result.text)
+        dropped = requested - len(calls)
         tool_results = tools.execute_tool_calls(
             conn,
             calls,
@@ -366,10 +372,17 @@ def execute_student_work_job(
             student_id=student["id"],
             lab_dir=lab_dir,
         )
+        overflow = (
+            f"\n\nNOTE: you requested {requested} tool calls; only the first {len(calls)} "
+            f"were run and {dropped} were discarded. Re-request the discarded ones in your "
+            "next response if you still need them, and keep to "
+            f"{call_cap} calls per response."
+        ) if dropped > 0 else ""
         delta = (
             f"--- your previous response ---\n{result.text}\n\n"
-            f"{tool_results}\n\nNow produce your complete updated working memory, taking the "
-            "tool results into account. You may call tools again if you genuinely need to."
+            f"{tool_results}{overflow}\n\nNow produce your complete updated working memory, "
+            "taking the tool results into account. You may call tools again if you genuinely "
+            "need to."
         )
         if result.session_id:
             # A resumable backend already retains the original prompt.
@@ -504,6 +517,11 @@ def execute_student_write_paper_job(
 
     template = _LEADING_HTML_COMMENT_RE.sub("", _PAPER_TEMPLATE_PATH.read_text(), count=1)
 
+    # Read-only, rooted in the lab workspace. Writing a paper means reading
+    # the artifacts it cites, and with no cwd at all Codex inherited the
+    # DAEMON's directory -- it wrote 655MB of research into auto-prof's own
+    # source tree, where it also broke test collection.
+
     result = jobs.run_with_session(
         conn,
         job_id,
@@ -517,7 +535,8 @@ def execute_student_write_paper_job(
             supervision=supervision.render_student_guidance(conn, task["id"], lab_dir),
             reference_bank=references.render_for_prompt(conn),
             template=template,
-        )
+        ),
+        **tools.evidence_cwd_options(backend.name, lab["id"]),
     )
 
     if result.rate_limited:
@@ -828,6 +847,7 @@ def execute_collaboration_write_paper_job(
             template_rules=_TEMPLATE_RULES,
             template=template,
         ),
+        **tools.evidence_cwd_options(backend.name, lab["id"]),
     )
 
     if result.rate_limited:

@@ -8,3 +8,6 @@ lab/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Research agents must never write here; the daemon runs from this directory.
+cacheprobe_revision_work_*/

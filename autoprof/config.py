@@ -75,7 +75,17 @@ DEFAULT_MAX_LAB_REVIEW_ROUNDS = 8
 # Model/tool turns inside one student-work or author-response job. This is
 # separate from supervision rounds: it lets a student finish an inspect ->
 # patch -> test cycle before handing incomplete memory back to the professor.
-DEFAULT_MAX_TOOL_ROUNDS = 3
+# Model/tool turns inside one research job. Three was too few to finish a
+# real task: jobs died with "tool round limit reached with an unexecuted tool
+# call", which throws away the whole round's work. Lab 9 has run at 12
+# successfully for days.
+DEFAULT_MAX_TOOL_ROUNDS = 12
+
+# Tool calls honoured in ONE round. Extra calls used to be dropped silently,
+# so a student asking for six saw four results, never learned the other two
+# were discarded, asked again next round, and burned the round budget doing
+# it -- which is how the round limit above got hit in the first place.
+DEFAULT_MAX_TOOL_CALLS_PER_ROUND = 8
 
 _CONFIG_PATH = db.REPO_ROOT / "autoprof.toml"
 
@@ -345,6 +355,32 @@ def max_lab_review_rounds(
         except (TypeError, ValueError):
             pass
     return DEFAULT_MAX_LAB_REVIEW_ROUNDS
+
+
+def max_tool_calls_per_round(
+    config_path: Path | None = None, env: dict | None = None, lab_id: int | None = None
+) -> int:
+    """Tool calls honoured in a single round."""
+    env = env if env is not None else os.environ
+    scoped = _scoped_nonnegative_int(
+        "AUTOPROF_MAX_TOOL_CALLS_PER_ROUND", "max_tool_calls_per_round",
+        lab_id=lab_id, config_path=config_path, env=env,
+    )
+    if scoped:
+        return scoped
+    raw = env.get("AUTOPROF_MAX_TOOL_CALLS_PER_ROUND")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    configured = _load(config_path).get("lab", {}).get("max_tool_calls_per_round")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_TOOL_CALLS_PER_ROUND
 
 
 def max_tool_rounds(

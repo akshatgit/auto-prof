@@ -47,7 +47,7 @@ from pathlib import Path
 VERIFY_TIMEOUT_SECONDS = 60
 VERIFY_MEMORY_BYTES = 1_024 * 1_024 * 1_024  # 1 GiB
 VERIFY_OUTPUT_LIMIT = 20_000
-MAX_TOOL_CALLS_PER_ROUND = 4
+MAX_TOOL_CALLS_PER_ROUND = 8
 
 # Validated for colour-vision deficiency (see the dataviz palette
 # validator). Slots 3 and 4 fall below 3:1 contrast on white, which is why
@@ -1237,7 +1237,7 @@ def render_tool_docs() -> str:
     )
 
 
-def parse_tool_calls(text: str) -> list[tuple[str, str]]:
+def parse_tool_calls(text: str, limit: int | None = None) -> list[tuple[str, str]]:
     """Extract capped tool calls in source order.
 
     Fenced blocks are the documented protocol. Some otherwise compatible
@@ -1258,10 +1258,20 @@ def parse_tool_calls(text: str) -> list[tuple[str, str]]:
         matches.append((match.start(), match.group("name").lower(), match.group("body")))
     matches.sort(key=lambda item: item[0])
     calls = []
-    for _, name, body in matches[:MAX_TOOL_CALLS_PER_ROUND]:
+    cap = MAX_TOOL_CALLS_PER_ROUND if limit is None else max(1, limit)
+    for _, name, body in matches[:cap]:
         wrapped = _TOOL_SINGLE_ARGUMENT_RE.fullmatch(body)
         calls.append((name, wrapped.group("value") if wrapped else body))
     return calls
+
+
+def count_tool_calls(text: str) -> int:
+    """How many calls the response actually contains, before any cap.
+
+    Lets a caller notice that it silently discarded some and say so, rather
+    than leaving the model to infer it from missing results.
+    """
+    return len(parse_tool_calls(text, limit=10_000))
 
 
 def has_unparsed_tool_syntax(text: str) -> bool:
