@@ -113,7 +113,11 @@ EXPERIMENT_TIMEOUT = 3600
 # lab and intentionally accepts only checked-in experiment scripts or the
 # workspace test runner; it is not a general shell.
 WORKSPACE_EXEC_LABS_ENV = "AUTOPROF_WORKSPACE_EXEC_LABS"
-WORKSPACE_EXEC_TIMEOUT = 900
+# A campaign that hunts for defects runs for hours, not minutes. 900s was
+# short enough that a lab could mistake the tool's ceiling for the size of
+# experiment it was allowed to design. Long runs must still checkpoint --
+# this raises the ceiling, it does not remove the need to resume.
+WORKSPACE_EXEC_TIMEOUT = 3600
 WORKSPACE_EXEC_OUTPUT_LIMIT = 40_000
 
 # A task's own home directory.  `experiment` deliberately runs only checked-in
@@ -124,7 +128,7 @@ WORKSPACE_EXEC_OUTPUT_LIMIT = 40_000
 # lab/<lab>/tasks/<task>/home with a real shell in it.  Opt-in per lab, same
 # as workspace execution.
 TASK_HOME_LABS_ENV = "AUTOPROF_TASK_HOME_LABS"
-TASK_HOME_TIMEOUT = 1800
+TASK_HOME_TIMEOUT = 7200
 TASK_HOME_OUTPUT_LIMIT = 40_000
 TASK_HOME_ARTIFACTS = "artifacts"
 
