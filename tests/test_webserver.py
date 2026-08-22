@@ -456,3 +456,66 @@ class TaskFileBrowserTests(unittest.TestCase):
             self.assertTrue(
                 any(p.match(path) for p, _ in webserver._ROUTES), path
             )
+
+
+class JobsPageTests(unittest.TestCase):
+    """The jobs tab must distinguish working from hung."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _job(self, status="running", **kw):
+        cols = ["kind", "target_type", "target_id", "status"]
+        vals = ["student_work", "task", self.ids["task_id"], status]
+        for k, v in kw.items():
+            cols.append(k); vals.append(v)
+        cur = self.conn.execute(
+            f"INSERT INTO jobs ({','.join(cols)}) VALUES ({','.join('?' * len(vals))})", vals)
+        self.conn.commit()
+        return cur.lastrowid
+
+    def test_running_job_shows_tokens_and_items(self):
+        self._job(started_at="2026-08-22 10:00:00", progress_at="2026-08-22 10:05:00",
+                  progress_tokens=4210, progress_items=7)
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("4210 tokens", page)
+        self.assertIn("7 items", page)
+        self.assertIn("last output", page)
+
+    def test_a_job_with_no_output_is_flagged(self):
+        self._job(started_at="2026-08-22 10:00:00")
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("no output yet", page)
+        self.assertIn("stale", page)
+
+    def test_empty_state_is_not_an_error(self):
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("Nothing running", page)
+        self.assertIn("Queue empty", page)
+
+    def test_queue_and_failures_are_summarised(self):
+        self._job(status="pending")
+        self._job(status="failed", last_error="handler raised OSError: boom")
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("student_work", page)
+        self.assertIn("boom", page)
+
+    def test_error_text_is_escaped(self):
+        self._job(status="failed", last_error="<script>alert(1)</script>")
+        page = webserver.render_jobs(self.conn)
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;", page)
+
+    def test_nav_links_every_page_to_jobs(self):
+        self.assertIn("/jobs", webserver.render_lab_list(self.conn))
+        self.assertIn("/jobs", webserver.render_jobs(self.conn))
+
+    def test_route_is_registered(self):
+        self.assertTrue(any(p.match("/jobs") for p, _ in webserver._ROUTES))
+
+    def test_page_refreshes_itself(self):
+        self.assertIn("location.reload", webserver.render_jobs(self.conn))

@@ -29,6 +29,10 @@ body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto;
 table {{ border-collapse: collapse; width: 100%; }}
 td, th {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }}
 .status {{ font-family: monospace; }}
+.nav {{ margin: 0 0 1.25rem; padding-bottom: 0.5rem; border-bottom: 1px solid #e2e2e2; }}
+.nav a {{ margin-right: 1rem; text-decoration: none; font-weight: 600; }}
+.work {{ font-family: monospace; }}
+.stale {{ color: #b1450d; }} .fresh {{ color: #14794a; }} .muted {{ color: #777; }}
 a {{ color: #06c; }}
 pre {{ white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; border-radius: 4px; }}
 .tool-payload {{ max-height: 32rem; overflow: auto; border: 1px solid #e2e2e2; }}
@@ -65,7 +69,7 @@ pre {{ white-space: pre-wrap; background: #f6f6f6; padding: 0.75rem; border-radi
 </script>
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 </head>
-<body>{body}</body></html>"""
+<body><nav class='nav'><a href='/'>Labs</a><a href='/jobs'>Jobs</a></nav>{body}</body></html>"""
 
 _MATH_STRIP_RE = re.compile(r"\\[\[\]()]|\\[a-zA-Z]+\s*|[{}$]")
 
@@ -121,6 +125,84 @@ def render_lab_list(conn: sqlite3.Connection) -> str:
         f"{items}</table>"
     )
     return _PAGE.format(title="autoprof — Labs", body=body)
+
+
+def render_jobs(conn: sqlite3.Connection) -> str:
+    """Live view of what the daemon is doing right now.
+
+    The column that matters is `work`: tokens the model has actually
+    produced and discrete items completed. Without it a job deep in a long
+    research round and a deadlocked one look identical, which is exactly
+    the confusion that cost this installation hours.
+    """
+    running = conn.execute(
+        "SELECT id, kind, target_type, target_id, started_at, lease_expires_at, "
+        "progress_at, progress_tokens, progress_items, attempts "
+        "FROM jobs WHERE status = 'running' ORDER BY id"
+    ).fetchall()
+
+    rows = []
+    for r in running:
+        if r["progress_at"]:
+            tokens, items = r["progress_tokens"] or 0, r["progress_items"] or 0
+            work = (f"<span class='work fresh'>{tokens} tokens &middot; {items} items</span>"
+                    f"<br><span class='muted'>last output {_e(r['progress_at'])}</span>")
+        else:
+            work = "<span class='work stale'>no output yet</span>"
+        rows.append(
+            f"<tr><td>#{r['id']}</td><td>{_e(r['kind'])}</td>"
+            f"<td>{_e(r['target_type'])} {r['target_id']}</td>"
+            f"<td class='muted'>{_e(r['started_at'])}</td>"
+            f"<td>{work}</td></tr>"
+        )
+    running_table = (
+        "<table><tr><th>job</th><th>kind</th><th>target</th><th>started</th>"
+        f"<th>work produced</th></tr>{''.join(rows)}</table>"
+        if rows else "<p class='muted'>Nothing running.</p>"
+    )
+
+    queued = conn.execute(
+        "SELECT kind, COUNT(*) AS n FROM jobs WHERE status = 'pending' "
+        "GROUP BY kind ORDER BY n DESC"
+    ).fetchall()
+    queue = "".join(
+        f"<tr><td>{_e(q['kind'])}</td><td>{q['n']}</td></tr>" for q in queued
+    )
+    queue_table = (
+        f"<table><tr><th>kind</th><th>pending</th></tr>{queue}</table>"
+        if queue else "<p class='muted'>Queue empty.</p>"
+    )
+
+    totals = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status ORDER BY n DESC"
+    ).fetchall()
+    totals_line = " &middot; ".join(f"{_e(t['status'])} {t['n']}" for t in totals)
+
+    failed = conn.execute(
+        "SELECT id, kind, target_id, substr(last_error, 1, 160) AS err FROM jobs "
+        "WHERE status = 'failed' ORDER BY id DESC LIMIT 15"
+    ).fetchall()
+    fail_rows = "".join(
+        f"<tr><td>#{f['id']}</td><td>{_e(f['kind'])}</td><td>{f['target_id']}</td>"
+        f"<td class='muted'>{_e((f['err'] or '').splitlines()[0] if f['err'] else '')}</td></tr>"
+        for f in failed
+    )
+    fail_table = (
+        "<table><tr><th>job</th><th>kind</th><th>target</th><th>error</th></tr>"
+        f"{fail_rows}</table>" if fail_rows else "<p class='muted'>No failures.</p>"
+    )
+
+    body = (
+        "<h1>Jobs</h1>"
+        f"<p class='muted'>{totals_line}</p>"
+        f"<h2>Running ({len(running)})</h2>{running_table}"
+        f"<h2>Queued</h2>{queue_table}"
+        "<h2>Recent failures</h2>" + fail_table +
+        # Reload rather than a <meta refresh>: the page template is shared and
+        # this keeps its signature unchanged.
+        "<script>setTimeout(function(){ location.reload(); }, 10000);</script>"
+    )
+    return _PAGE.format(title="autoprof — Jobs", body=body)
 
 
 def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
@@ -730,6 +812,7 @@ def render_supervision(conn: sqlite3.Connection, task_id: int, round_: int, lab_
 
 _ROUTES = [
     (re.compile(r"^/$"), lambda conn, m, d: render_lab_list(conn)),
+    (re.compile(r"^/jobs$"), lambda conn, m, d: render_jobs(conn)),
     (re.compile(r"^/labs/(\d+)$"), lambda conn, m, d: render_lab_detail(conn, int(m.group(1)))),
     (re.compile(r"^/students/(\d+)$"), lambda conn, m, d: render_student_detail(conn, int(m.group(1)))),
     (re.compile(r"^/professors/(\d+)$"), lambda conn, m, d: render_professor_detail(conn, int(m.group(1)))),
