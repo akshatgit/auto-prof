@@ -43,6 +43,8 @@ _ADDITIVE_MIGRATIONS = (
     ("jobs", "backend", "TEXT"),
     ("jobs", "backend_model", "TEXT"),
     ("jobs", "progress_at", "TEXT"),
+    ("jobs", "progress_input_tokens", "INTEGER"),
+    ("jobs", "progress_cached_tokens", "INTEGER"),
     ("jobs", "progress_tokens", "INTEGER"),
     ("jobs", "progress_items", "INTEGER"),
     # JSON detail about an event. Added for escalation records, which

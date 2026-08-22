@@ -1,3 +1,5 @@
+import os
+from unittest import mock
 import tempfile
 from pathlib import Path
 import http.client
@@ -596,3 +598,47 @@ class JobDetailTests(unittest.TestCase):
         self.assertTrue(any(p.match("/jobs/12") for p, _ in webserver._ROUTES))
         self._job(started_at="2026-08-22 10:00:00", backend="codex")
         self.assertIn("/jobs/", webserver.render_jobs(self.conn))
+
+
+class JobsPageUsageTests(unittest.TestCase):
+    """Tokens, rate and cost on the dashboard."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _job(self, produced, inp=0, cached=0, model="gpt-5.5"):
+        self.conn.execute(
+            "INSERT INTO jobs (kind,target_type,target_id,status,backend,backend_model,"
+            "progress_at,progress_tokens,progress_input_tokens,progress_cached_tokens) "
+            "VALUES ('student_work','task',?, 'done','codex',?, '2026-08-22 10:00:00',?,?,?)",
+            (self.ids["task_id"], model, produced, inp, cached))
+        self.conn.commit()
+
+    def test_lifetime_totals_are_shown_with_separators(self):
+        self._job(1234567, inp=7654321, cached=4000000)
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("1,234,567", page)
+        self.assertIn("7,654,321", page)
+
+    def test_rate_windows_are_present(self):
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("last 10 min", page)
+        self.assertIn("last 20 min", page)
+        self.assertIn("/hr", page)
+
+    def test_cost_says_so_when_unpriced(self):
+        self._job(1000)
+        page = webserver.render_jobs(self.conn)
+        self.assertIn("No prices configured", page)
+        self.assertIn("AUTOPROF_PRICE_", page)
+
+    def test_cost_appears_once_priced(self):
+        self._job(1_000_000)
+        with mock.patch.dict(os.environ, {"AUTOPROF_PRICE_GPT_5_5_OUTPUT": "10"}):
+            page = webserver.render_jobs(self.conn)
+        self.assertIn("$10.00", page)
+        self.assertIn("total estimate", page)

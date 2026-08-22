@@ -266,15 +266,28 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
     except OSError:
         log_path = None
 
-    def write_now():
+    def write_now(sample: bool = False):
         try:
             side = _sqlite3.connect(db_path, timeout=5)
             try:
                 side.execute(
                     "UPDATE jobs SET progress_at = datetime('now'), progress_tokens = ?, "
-                    "progress_items = ? WHERE id = ?",
-                    (progress.produced_tokens, progress.items, job_id),
+                    "progress_items = ?, progress_input_tokens = ?, "
+                    "progress_cached_tokens = ? WHERE id = ?",
+                    (progress.produced_tokens, progress.items, progress.input_tokens,
+                     progress.cached_tokens, job_id),
                 )
+                if sample:
+                    # A cumulative point in a time series. Rate is a difference
+                    # between two of these; the job row alone only ever holds
+                    # the latest total.
+                    side.execute(
+                        "INSERT INTO token_samples (job_id, backend, backend_model, "
+                        "produced_tokens, input_tokens, cached_tokens) "
+                        "SELECT ?, backend, backend_model, ?, ?, ? FROM jobs WHERE id = ?",
+                        (job_id, progress.produced_tokens, progress.input_tokens,
+                         progress.cached_tokens, job_id),
+                    )
                 side.commit()
             finally:
                 side.close()
@@ -295,6 +308,7 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
         if now - state["last_write"] < every_seconds:
             return
         state["last_write"] = now
+        write_now(sample=True)
         try:
             side = _sqlite3.connect(db_path, timeout=5)
             try:
@@ -315,7 +329,7 @@ def _progress_recorder(conn: sqlite3.Connection, job_id: int, every_seconds: flo
     # very end of a call -- the throttle above then skips it and the finished
     # job keeps whatever stale count the last heartbeat wrote, usually zero.
     # The flush is what makes the final number true.
-    record.flush = write_now
+    record.flush = lambda: write_now(sample=True)
     record.progress = progress
     return record
 

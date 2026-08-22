@@ -197,10 +197,50 @@ def render_jobs(conn: sqlite3.Connection) -> str:
         f"{fail_rows}</table>" if fail_rows else "<p class='muted'>No failures.</p>"
     )
 
+    from . import usage as usage_mod
+    tot = usage_mod.totals(conn)
+    r20 = usage_mod.rate(conn, minutes=20)
+    r10 = usage_mod.rate(conn, minutes=10)
+    spend = usage_mod.cost(conn)
+
+    def n(value):
+        return f"{int(value):,}"
+
+    if spend["by_model"]:
+        rows_cost = "".join(
+            f"<tr><td>{_e(m['model'])}</td><td class='work'>${m['amount']:,.2f}</td>"
+            f"<td class='muted'>{n(m['produced'])} out / {n(m['input'])} in</td></tr>"
+            for m in spend["by_model"])
+        cost_block = (f"<table><tr><th>model</th><th>estimated cost</th><th>tokens</th></tr>"
+                      f"{rows_cost}</table>"
+                      f"<p class='work'>total estimate ${spend['total']:,.2f}</p>")
+    else:
+        cost_block = "<p class='muted'>No prices configured, so no cost is estimated.</p>"
+    if spend["unpriced"]:
+        cost_block += (
+            "<p class='muted'>Unpriced: " + _e(", ".join(spend["unpriced"])) +
+            ". Set <code>AUTOPROF_PRICE_&lt;MODEL&gt;_INPUT|CACHED|OUTPUT</code> "
+            "(dollars per million tokens) to include them.</p>")
+
+    usage_block = (
+        "<h2>Tokens</h2>"
+        "<table>"
+        f"<tr><th>produced (lifetime)</th><td class='work'>{n(tot['produced'])}</td></tr>"
+        f"<tr><th>prompt in / of which cached</th>"
+        f"<td class='work'>{n(tot['input'])} / {n(tot['cached'])}</td></tr>"
+        f"<tr><th>last 10 min</th><td class='work'>{n(r10['produced'])} "
+        f"<span class='muted'>({n(r10['per_hour'])}/hr across {r10['jobs']} job(s))</span></td></tr>"
+        f"<tr><th>last 20 min</th><td class='work'>{n(r20['produced'])} "
+        f"<span class='muted'>({n(r20['per_hour'])}/hr across {r20['jobs']} job(s))</span></td></tr>"
+        "</table>"
+        "<h2>Estimated cost</h2>" + cost_block
+    )
+
     body = (
         "<h1>Jobs</h1>"
         f"<p class='muted'>{totals_line}</p>"
-        f"<h2>Running ({len(running)})</h2>{running_table}"
+        + usage_block
+        + f"<h2>Running ({len(running)})</h2>{running_table}"
         f"<h2>Queued</h2>{queue_table}"
         "<h2>Recent failures</h2>" + fail_table +
         # Reload rather than a <meta refresh>: the page template is shared and

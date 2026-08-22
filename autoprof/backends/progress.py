@@ -27,6 +27,7 @@ class Progress:
     output_tokens: int = 0    # tokens the model actually produced
     reasoning_tokens: int = 0
     input_tokens: int = 0
+    cached_tokens: int = 0
     last_event: str | None = None
 
     # Fields we sum across turns; codex reports usage per completed turn.
@@ -63,6 +64,7 @@ class Progress:
                 self.output_tokens += int(usage.get("output_tokens") or 0)
                 self.reasoning_tokens += int(usage.get("reasoning_output_tokens") or 0)
                 self.input_tokens += int(usage.get("input_tokens") or 0)
+                self.cached_tokens += int(usage.get("cached_input_tokens") or 0)
 
     def summary(self) -> str:
         return (
@@ -77,6 +79,7 @@ class Progress:
             "output_tokens": self.output_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "input_tokens": self.input_tokens,
+            "cached_tokens": self.cached_tokens,
             "items": self.items,
             "turns": self.turns,
             "lines": self.lines,

@@ -751,6 +751,8 @@ CREATE TABLE jobs (
     backend                 TEXT,
     backend_model           TEXT,
     progress_at             TEXT,
+    progress_input_tokens   INTEGER,
+    progress_cached_tokens  INTEGER,
     progress_tokens         INTEGER,
     progress_items          INTEGER,
 
@@ -804,6 +806,21 @@ END;
 -- docs/DESIGN.md §6.3), and the thing `professors`/`students` decision
 -- rationale traces back to when you ask "why did this happen" years
 -- later. Never updated or deleted after insert.
+-- Cumulative token counts sampled while a job runs. A rate needs a series;
+-- the job row only ever holds the latest total, so without this "tokens in
+-- the last 20 minutes" cannot be computed at all.
+CREATE TABLE IF NOT EXISTS token_samples (
+    id              INTEGER PRIMARY KEY,
+    job_id          INTEGER NOT NULL REFERENCES jobs(id),
+    backend         TEXT,
+    backend_model   TEXT,
+    produced_tokens INTEGER NOT NULL DEFAULT 0,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    cached_tokens   INTEGER NOT NULL DEFAULT 0,
+    sampled_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_token_samples_at ON token_samples(sampled_at);
+
 CREATE TABLE events (
     id              INTEGER PRIMARY KEY,
     -- Nullable: most events trace back to a completed job, but 'human'
