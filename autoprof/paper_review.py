@@ -320,6 +320,55 @@ def _accepted_paper_count(conn: sqlite3.Connection, task_id: int) -> int:
     return row["n"]
 
 
+# Verdict ordering, worst to best, for deciding whether revision is helping.
+_VERDICT_RANK = {
+    "strong_reject": 0, "reject": 1, "weak_reject": 2,
+    "weak_accept": 3, "accept": 4, "strong_accept": 5,
+}
+
+# Consecutive rounds without the panel's best verdict improving before a paper
+# goes back to research rather than being revised again.
+REVISION_STALL_ROUNDS = 3
+
+
+def _revision_has_stalled(conn: sqlite3.Connection, paper_id: int) -> bool:
+    """Has revising stopped moving the panel?
+
+    A round cap alone cannot answer this: with a finite cap a paper escapes
+    after N rounds whether or not it was improving, and with the cap disabled
+    it never escapes at all. Paper 68 climbed strong_reject -> strong_accept
+    over two rounds and then stopped dead, while paper 67 was queued for a
+    tenth revision after nine; both were being asked to fix, by rewriting,
+    an objection about significance that rewriting cannot reach.
+
+    Improvement is measured on the panel's BEST verdict per round, because
+    that is what the accept gate reads.
+    """
+    rows = conn.execute(
+        "SELECT review_round, verdict FROM reviews "
+        "WHERE target_type='paper' AND target_id=? ORDER BY review_round",
+        (paper_id,),
+    ).fetchall()
+    best: dict[int, int] = {}
+    for row in rows:
+        rank = _VERDICT_RANK.get(row["verdict"], 0)
+        best[row["review_round"]] = max(best.get(row["review_round"], 0), rank)
+    rounds = sorted(best)
+    if len(rounds) < REVISION_STALL_ROUNDS + 1:
+        return False
+    # Count consecutive trailing rounds that failed to beat the best verdict
+    # achieved before them. Comparing a whole window against everything
+    # earlier does not work: a peak INSIDE the window masks the plateau after
+    # it, which is exactly paper 68's shape.
+    stalled = 0
+    for index in range(len(rounds) - 1, 0, -1):
+        prior_best = max(best[r] for r in rounds[:index])
+        if best[rounds[index]] > prior_best:
+            break
+        stalled += 1
+    return stalled >= REVISION_STALL_ROUNDS
+
+
 def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, job_id: int) -> None:
     """Once all REVIEWER_COUNT reviews for this round are in, tally.
 
@@ -431,6 +480,15 @@ def _maybe_finalize(conn: sqlite3.Connection, paper_id: int, review_round: int, 
         # Leave this paper rejected with its review history intact and start
         # a fresh research attempt. A later ready decision creates a new
         # paper row, so the old artifact remains auditable.
+        conn.execute(
+            "INSERT INTO jobs (kind, target_type, target_id, status) "
+            "VALUES ('student_work', 'task', ?, 'pending')",
+            (paper["task_id"],),
+        )
+    elif _revision_has_stalled(conn, paper_id):
+        # Revision has stopped moving the panel. Another rewrite of the same
+        # document will not move it either; send the task back to research so
+        # the next submission carries new evidence rather than new wording.
         conn.execute(
             "INSERT INTO jobs (kind, target_type, target_id, status) "
             "VALUES ('student_work', 'task', ?, 'pending')",

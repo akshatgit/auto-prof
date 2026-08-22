@@ -579,3 +579,77 @@ class SweepStalledReviewsTests(unittest.TestCase):
         out = paper_review.sweep_stalled_reviews(self.conn)
         self.assertEqual(out["finalized"], [])
         self.assertTrue(out["requeued"])
+
+
+class RevisionStallTests(unittest.TestCase):
+    """Revision must stop when it stops moving the panel."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        cur = self.conn.execute(
+            "INSERT INTO papers (task_id, student_id, path, title, status, review_round) "
+            "VALUES (?, ?, 'p.html', 'T', 'in_review', 1)",
+            (self.ids["task_id"], self.ids["student_id"]),
+        )
+        self.paper_id = cur.lastrowid
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _round(self, rnd, verdicts):
+        # A trigger requires reviews to match the paper's current round.
+        self.conn.execute("UPDATE papers SET review_round = ? WHERE id = ?",
+                          (rnd, self.paper_id))
+        for i, v in enumerate(verdicts, start=1):
+            self.conn.execute(
+                "INSERT INTO reviews (target_type, target_id, review_round, reviewer_index, "
+                "verdict, rationale_path) VALUES ('paper', ?, ?, ?, ?, 'r.md')",
+                (self.paper_id, rnd, i, v),
+            )
+        self.conn.commit()
+
+    def _stalled(self):
+        return paper_review._revision_has_stalled(self.conn, self.paper_id)
+
+    def test_too_early_to_judge(self):
+        self._round(1, ["reject", "reject", "reject"])
+        self.assertFalse(self._stalled())
+
+    def test_steady_improvement_is_not_a_stall(self):
+        self._round(1, ["strong_reject"] * 3)
+        self._round(2, ["reject"] * 3)
+        self._round(3, ["weak_accept", "reject", "reject"])
+        self._round(4, ["strong_accept", "reject", "reject"])
+        self.assertFalse(self._stalled())
+
+    def test_plateau_after_a_peak_is_a_stall(self):
+        # paper 68's actual shape: climbs, then stops dead.
+        self._round(1, ["strong_reject", "reject", "reject"])
+        self._round(2, ["weak_reject", "strong_accept", "weak_accept"])
+        self._round(3, ["reject", "strong_accept", "accept"])
+        self._round(4, ["reject", "strong_accept", "accept"])
+        self.assertFalse(self._stalled())   # two flat rounds: still allowed
+        self._round(5, ["reject", "strong_accept", "accept"])
+        self.assertTrue(self._stalled())    # three: revision is not working
+
+    def test_flat_rejection_is_a_stall(self):
+        for rnd in (1, 2, 3, 4):
+            self._round(rnd, ["reject", "reject", "reject"])
+        self.assertTrue(self._stalled())
+
+    def test_a_late_improvement_clears_the_stall(self):
+        for rnd in (1, 2, 3):
+            self._round(rnd, ["reject"] * 3)
+        self._round(4, ["strong_accept", "reject", "reject"])
+        self.assertFalse(self._stalled())
+
+    def test_it_reads_the_best_verdict_not_the_average(self):
+        # The accept gate counts strong_accepts, so improvement is measured
+        # on the best verdict, not on the panel mean.
+        self._round(1, ["strong_reject"] * 3)
+        self._round(2, ["strong_reject", "strong_reject", "weak_accept"])
+        self._round(3, ["strong_reject", "strong_reject", "accept"])
+        self._round(4, ["strong_reject", "strong_reject", "strong_accept"])
+        self.assertFalse(self._stalled())
