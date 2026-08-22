@@ -215,6 +215,9 @@ WORKSPACE_WRITER_KINDS = frozenset(
 # running, and no tick for four minutes. Reclaim could not fire either,
 # because it runs at the top of a tick and the tick was the thing stuck.
 _INFLIGHT: dict = {}
+# Job ids whose worker never returned. Kept only so the condition is
+# reportable rather than silent.
+_ABANDONED: set = set()
 _INFLIGHT_LOCK = threading.Lock()
 _POOL = None
 _POOL_SIZE = 0
@@ -231,15 +234,33 @@ def _worker_pool(workers: int):
         return _POOL
 
 
+# How long a future may stay in flight before dispatch stops counting it.
+# A worker that never returns would otherwise hold its slot AND mark its lab
+# busy forever: lab 8 sat idle for 350 ticks behind one such thread while five
+# workers were free. Matching the lease means the job is reclaimable at the
+# same moment we stop waiting for it.
+INFLIGHT_GRACE_SECONDS = 1800
+
+
 def _reap_inflight() -> set:
-    """Drop finished futures; return the job ids still executing."""
+    """Drop finished futures; return the job ids still considered executing.
+
+    Abandoning a stuck entry does NOT kill its thread -- we cannot -- but it
+    frees the slot and lets the lease protocol reclaim the job, which is the
+    same escape a crashed daemon gets.
+    """
+    now = time.monotonic()
     with _INFLIGHT_LOCK:
-        for job_id in [j for j, f in _INFLIGHT.items() if f.done()]:
-            future = _INFLIGHT.pop(job_id)
-            try:
-                future.result()
-            except Exception:   # noqa: BLE001 -- already recorded on the job row
-                pass
+        for job_id, (future, started) in list(_INFLIGHT.items()):
+            if future.done():
+                _INFLIGHT.pop(job_id)
+                try:
+                    future.result()
+                except Exception:   # noqa: BLE001 -- already recorded on the job row
+                    pass
+            elif now - started > INFLIGHT_GRACE_SECONDS:
+                _INFLIGHT.pop(job_id)
+                _ABANDONED.add(job_id)
         return set(_INFLIGHT)
 
 
@@ -350,12 +371,13 @@ def dispatch_pending_jobs(
             return 0
         with _INFLIGHT_LOCK:
             for row in chosen:
-                _INFLIGHT[row["id"]] = pool.submit(
+                future = pool.submit(
                     _execute_one,
                     db_path, row["id"], row["kind"], registry,
                     prompt_builders, lab_dir, special_handlers,
                     row["reviewer_index"],
                 )
+                _INFLIGHT[row["id"]] = (future, time.monotonic())
         return len(chosen)
 
     for candidate in candidate_rows:

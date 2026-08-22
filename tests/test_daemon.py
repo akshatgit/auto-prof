@@ -890,3 +890,56 @@ class NonBlockingDispatchTests(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertEqual(daemon._reap_inflight(), set())
+
+
+class InflightGraceTests(unittest.TestCase):
+    """A worker that never returns must not hold its slot forever."""
+
+    def setUp(self):
+        daemon._INFLIGHT.clear(); daemon._ABANDONED.clear()
+        daemon._POOL = None; daemon._POOL_SIZE = 0
+
+    def tearDown(self):
+        daemon._INFLIGHT.clear(); daemon._ABANDONED.clear()
+
+    def _never_finishes(self):
+        import concurrent.futures
+        return concurrent.futures.Future()   # never resolved
+
+    def test_a_fresh_future_is_still_counted(self):
+        import time as t
+        daemon._INFLIGHT[42] = (self._never_finishes(), t.monotonic())
+        self.assertIn(42, daemon._reap_inflight())
+
+    def test_a_stuck_future_is_abandoned_after_the_grace_period(self):
+        import time as t
+        daemon._INFLIGHT[42] = (self._never_finishes(),
+                                t.monotonic() - daemon.INFLIGHT_GRACE_SECONDS - 1)
+        self.assertNotIn(42, daemon._reap_inflight())
+        self.assertIn(42, daemon._ABANDONED)
+
+    def test_abandoning_frees_the_slot_for_new_work(self):
+        import time as t
+        for i in range(2):
+            daemon._INFLIGHT[i] = (self._never_finishes(),
+                                   t.monotonic() - daemon.INFLIGHT_GRACE_SECONDS - 1)
+        self.assertEqual(daemon._reap_inflight(), set())
+
+    def test_a_stuck_writer_stops_holding_its_lab(self):
+        # The lab-8 symptom: one stuck worker marked the lab busy forever.
+        conn = fresh_db()
+        ids = seed_lab_with_student(conn)
+        import time as t
+        cur = conn.execute(
+            "INSERT INTO jobs (kind,target_type,target_id,status) "
+            "VALUES ('student_work','task',?, 'pending')", (ids["task_id"],))
+        stuck = cur.lastrowid
+        conn.commit()
+        daemon._INFLIGHT[stuck] = (self._never_finishes(),
+                                   t.monotonic() - daemon.INFLIGHT_GRACE_SECONDS - 1)
+        rows = conn.execute(
+            "SELECT id,kind,reviewer_index,target_type,target_id FROM jobs "
+            "WHERE status='pending'").fetchall()
+        kept = daemon._serialize_workspace_writers(conn, rows)
+        self.assertTrue(kept, "lab stayed blocked by an abandoned worker")
+        conn.close()
