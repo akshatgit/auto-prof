@@ -273,3 +273,34 @@ class PapersStatusRebuildTests(unittest.TestCase):
             conn.execute("SELECT sql FROM sqlite_master WHERE name='papers'").fetchone()[0],
         )
         conn.close()
+
+
+class AdditiveTableTests(unittest.TestCase):
+    """A table added after a DB exists must still appear."""
+
+    def test_new_table_is_created_on_an_existing_database(self):
+        import tempfile, sqlite3
+        from pathlib import Path
+        from autoprof import db as db_module
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "old.db"
+            conn = db_module.connect(path)
+            db_module.ensure_initialized(conn)
+            conn.execute("DROP TABLE token_samples")     # simulate a DB predating it
+            conn.commit()
+            self.assertFalse(list(conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='token_samples'")))
+            db_module.ensure_initialized(conn)
+            self.assertTrue(list(conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='token_samples'")))
+            conn.close()
+
+    def test_ensure_initialized_is_repeatable(self):
+        import tempfile
+        from pathlib import Path
+        from autoprof import db as db_module
+        with tempfile.TemporaryDirectory() as d:
+            conn = db_module.connect(Path(d) / "x.db")
+            for _ in range(3):
+                db_module.ensure_initialized(conn)
+            conn.close()

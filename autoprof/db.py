@@ -289,6 +289,22 @@ _ADDITIVE_TABLES = (
         "idx_jobs_operation_id",
         "CREATE UNIQUE INDEX idx_jobs_operation_id ON jobs(operation_id)",
     ),
+    # Cumulative token counts sampled while a job runs. A rate needs a
+    # series; the job row only holds the latest total, so without this
+    # "tokens in the last 20 minutes" cannot be computed at all.
+    ("token_samples", """CREATE TABLE token_samples (
+        id              INTEGER PRIMARY KEY,
+        job_id          INTEGER NOT NULL REFERENCES jobs(id),
+        backend         TEXT,
+        backend_model   TEXT,
+        produced_tokens INTEGER NOT NULL DEFAULT 0,
+        input_tokens    INTEGER NOT NULL DEFAULT 0,
+        cached_tokens   INTEGER NOT NULL DEFAULT 0,
+        sampled_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )"""),
+    ("idx_token_samples_at",
+     "CREATE INDEX idx_token_samples_at ON token_samples(sampled_at)"),
+
 )
 
 
