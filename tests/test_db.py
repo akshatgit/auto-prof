@@ -208,7 +208,7 @@ class ToolRunsCheckRebuildTests(unittest.TestCase):
 
         conn = self._legacy_db()
         db.ensure_initialized(conn)
-        emitted = tools._TOOL_BLOCK_RE.pattern.split("tool:(")[1].split(")")[0].split("|")
+        emitted = tools.TOOL_NAMES
         for tool in emitted:
             conn.execute(
                 "INSERT INTO tool_runs (lab_id, tool, input_path, output_path, status) "

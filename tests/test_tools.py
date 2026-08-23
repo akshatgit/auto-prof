@@ -986,12 +986,12 @@ class UnopenedToolFenceTests(unittest.TestCase):
         text = 'tool:shell\ncd task37 && python3 -m run_validation\n```'
         self.assertEqual(
             tools.parse_tool_calls(text),
-            [("shell", "cd task37 && python3 -m run_validation")],
+            [("shell", "cd task37 && python3 -m run_validation\n")],
         )
 
     def test_call_after_prose_is_found(self):
         text = "Here is my plan.\n\ntool:readfile\ndocs/x.md\n```"
-        self.assertEqual(tools.parse_tool_calls(text), [("readfile", "docs/x.md")])
+        self.assertEqual(tools.parse_tool_calls(text), [("readfile", "docs/x.md\n")])
 
     def test_prose_mentioning_a_tool_is_not_executed(self):
         self.assertEqual(tools.parse_tool_calls("I would use tool:shell here."), [])
@@ -1037,3 +1037,33 @@ class GitBinaryOutputTests(unittest.TestCase):
             done = tools._git(root, "status", "--porcelain")
             self.assertEqual(done.returncode, 0)
             self.assertIn("odd-", done.stdout)
+
+
+class FenceInsideToolBodyTests(unittest.TestCase):
+    """A shell script that writes markdown has fences inside its own body."""
+
+    def test_heredoc_containing_a_fence_survives_intact(self):
+        text = (
+            "```tool:shell\n"
+            "cat > docs/REPAIR_LOG.md <<'EOF'\n"
+            "## Item 6\n"
+            "```\n"
+            "grep -rn '0x4588' .\n"
+            "```\n"
+            "EOF\n"
+            "wc -c docs/REPAIR_LOG.md\n"
+            "```\n"
+        )
+        (name, body), = tools.parse_tool_calls(text)
+        self.assertEqual(name, "shell")
+        self.assertIn("EOF", body.split("wc -c")[0])
+        self.assertIn("wc -c docs/REPAIR_LOG.md", body)
+
+    def test_two_calls_do_not_merge(self):
+        text = "```tool:shell\necho a\n```\n\n```tool:readfile\nx.md\n```\n"
+        self.assertEqual(
+            [name for name, _ in tools.parse_tool_calls(text)], ["shell", "readfile"]
+        )
+
+    def test_an_unterminated_block_is_not_executed(self):
+        self.assertEqual(tools.parse_tool_calls("```tool:shell\nrm -rf /\n"), [])

@@ -66,10 +66,16 @@ TOOL_NAMES = (
 )
 _NAMES = "|".join(TOOL_NAMES)
 
-_TOOL_BLOCK_RE = re.compile(
-    rf"```tool:({_NAMES})"
-    r"\s*\n(.*?)```", re.DOTALL | re.IGNORECASE
+# The opener of a fenced tool block. Where the block ENDS is decided by
+# _fenced_tool_calls, not by this pattern: a non-greedy ``` would stop at the
+# first fence inside the body, and a shell script that writes markdown has
+# fences inside the body all the time.
+_TOOL_OPEN_RE = re.compile(
+    rf"(?:\A|\n)(?P<indent>[ \t]*)```tool:(?P<name>{_NAMES})[ \t]*\n",
+    re.IGNORECASE,
 )
+# A line that is nothing but a closing fence.
+_FENCE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*$", re.MULTILINE)
 _TOOL_XML_RE = re.compile(
     rf"<tool:(?P<name>{_NAMES})>"
     r"\s*(?P<body>.*?)\s*</tool:(?P=name)>",
@@ -81,10 +87,9 @@ _TOOL_XML_RE = re.compile(
 # so every such round erased the student's research record. Accept the form,
 # but only when the closing fence is there and the name starts its own line, so
 # prose that merely mentions a tool cannot be executed.
-_TOOL_UNOPENED_RE = re.compile(
-    rf"(?:\A|\n)tool:(?P<name>{_NAMES})[ \t]*\n"
-    r"(?P<body>.*?)\n```[ \t]*(?=\n|\Z)",
-    re.DOTALL | re.IGNORECASE,
+_TOOL_UNOPENED_OPEN_RE = re.compile(
+    rf"(?:\A|\n)tool:(?P<name>{_NAMES})[ \t]*\n",
+    re.IGNORECASE,
 )
 _TOOL_TRAILING_WRAPPER_RE = re.compile(
     rf"```tool:(?P<name>{_NAMES})"
@@ -1267,6 +1272,41 @@ def render_tool_docs() -> str:
     )
 
 
+def _fenced_tool_calls(text: str):
+    """Yield (offset, name, body) for every fenced tool block in `text`.
+
+    The body ends at the LAST bare closing fence before the next tool opener,
+    not the first. A non-greedy ``` stopped at the first fence *inside* the
+    body, so any shell script that wrote markdown -- a script with a fenced
+    example in its heredoc -- was cut mid-heredoc and handed to bash without a
+    terminator. Lab 8 lost two rounds to exactly that, reporting "here-document
+    delimited by end-of-file" and concluding the shell tool was eating its
+    input.
+
+    Both the fenced form and the opener-less form minimax-m3 emits are handled
+    here, since they differ only in how the block starts.
+    """
+    openers = []
+    for match in _TOOL_OPEN_RE.finditer(text):
+        openers.append((match.start(), match.end(), match.group("name")))
+    for match in _TOOL_UNOPENED_OPEN_RE.finditer(text):
+        # An unopened `tool:` line inside an already-fenced block is body text.
+        if any(start <= match.start() < end for start, end, _ in openers):
+            continue
+        openers.append((match.start(), match.end(), match.group("name")))
+    openers.sort()
+
+    for index, (start, body_start, name) in enumerate(openers):
+        limit = openers[index + 1][0] if index + 1 < len(openers) else len(text)
+        closes = [m for m in _FENCE_LINE_RE.finditer(text, body_start, limit)]
+        if not closes:
+            # No terminator: an unopened block without its closing fence is
+            # prose, and a fenced block that ran out of response is truncated
+            # output we must not execute.
+            continue
+        yield (start, name.lower(), text[body_start:closes[-1].start()])
+
+
 def parse_tool_calls(text: str, limit: int | None = None) -> list[tuple[str, str]]:
     """Extract capped tool calls in source order.
 
@@ -1276,17 +1316,13 @@ def parse_tool_calls(text: str, limit: int | None = None) -> list[tuple[str, str
     caused four unexecuted read requests to overwrite a student's research
     record while the job was incorrectly marked done.
     """
-    matches = []
-    for match in _TOOL_BLOCK_RE.finditer(text or ""):
-        matches.append((match.start(), match.group(1).lower(), match.group(2)))
+    matches = list(_fenced_tool_calls(text or ""))
     for match in _TOOL_XML_RE.finditer(text or ""):
         matches.append((match.start(), match.group("name").lower(), match.group("body")))
     # Some OpenAI-compatible tool gateways replace the final Markdown fence
     # with their own closing wrapper. Accept it only at end-of-response, so
     # arbitrary prose cannot terminate a partial patch early.
     for match in _TOOL_TRAILING_WRAPPER_RE.finditer(text or ""):
-        matches.append((match.start(), match.group("name").lower(), match.group("body")))
-    for match in _TOOL_UNOPENED_RE.finditer(text or ""):
         matches.append((match.start(), match.group("name").lower(), match.group("body")))
     matches.sort(key=lambda item: item[0])
     calls = []
