@@ -445,6 +445,9 @@ def run_tick(
     return {"reclaimed": reclaimed, "dispatched": dispatched}
 
 
+MAX_CONSECUTIVE_TICK_FAILURES = 10
+
+
 def run_daemon(
     conn: sqlite3.Connection,
     registry,
@@ -472,17 +475,41 @@ def run_daemon(
     there's no sleep left to report.
     """
     ticks = 0
+    consecutive_failures = 0
     while True:
-        stats = run_tick(
-            conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers,
-            workers=workers, db_path=db_path,
-        )
+        try:
+            stats = run_tick(
+                conn, registry, prompt_builders, lab_dir, budget_cap, special_handlers,
+                workers=workers, db_path=db_path,
+            )
+        except sqlite3.OperationalError as exc:
+            # A momentary "database is locked" once killed the daemon
+            # outright and eight hours of research sat idle behind it. One
+            # bad tick is not a reason to stop; a run of them is.
+            consecutive_failures += 1
+            stats = {"reclaimed": 0, "dispatched": 0, "error": str(exc)}
+            if consecutive_failures >= MAX_CONSECUTIVE_TICK_FAILURES:
+                raise
+        else:
+            consecutive_failures = 0
         ticks += 1
 
         last = once or (max_ticks is not None and ticks >= max_ticks)
-        delay = None if last else next_wake_delay(conn, default_interval)
+        if last:
+            delay = None
+        else:
+            # Scheduling and reporting read the database too, so they fail
+            # the same way a tick does. Fall back to the fixed interval
+            # rather than losing the loop to a query that is only advisory.
+            try:
+                delay = next_wake_delay(conn, default_interval)
+            except sqlite3.OperationalError:
+                delay = default_interval
         if on_tick is not None:
-            on_tick(ticks, stats, delay)
+            try:
+                on_tick(ticks, stats, delay)
+            except sqlite3.OperationalError:
+                pass
         if last:
             return
         sleep_fn(delay)

@@ -76,9 +76,11 @@ def _cmd_run(args) -> int:
             "SELECT COUNT(*) AS n FROM jobs WHERE status='running'"
         ).fetchone()["n"]
         sleeping = "" if delay is None else f" sleeping={delay:.0f}s"
+        failed = f" error={stats['error']}" if stats.get("error") else ""
         print(
             f"[tick {tick}] dispatched={stats['dispatched']} "
-            f"reclaimed={stats['reclaimed']} pending={pending} running={running}{sleeping}",
+            f"reclaimed={stats['reclaimed']} pending={pending} running={running}"
+            f"{sleeping}{failed}",
             flush=True,
         )
 

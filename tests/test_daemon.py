@@ -1,6 +1,7 @@
 import tempfile
 import sqlite3
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -943,3 +944,40 @@ class InflightGraceTests(unittest.TestCase):
         kept = daemon._serialize_workspace_writers(conn, rows)
         self.assertTrue(kept, "lab stayed blocked by an abandoned worker")
         conn.close()
+
+
+class TransientTickFailureTests(unittest.TestCase):
+    """One locked-database tick must not end the run."""
+
+    def _run(self, failures: int, max_ticks: int):
+        seen = []
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= failures:
+                raise sqlite3.OperationalError("database is locked")
+            return {"reclaimed": 0, "dispatched": 1}
+
+        with mock.patch.object(daemon, "run_tick", flaky), \
+             mock.patch.object(daemon, "next_wake_delay", lambda *a, **k: 0):
+            daemon.run_daemon(
+                mock.MagicMock(), None, {}, Path("."), max_ticks=max_ticks,
+                sleep_fn=lambda _d: None,
+                on_tick=lambda tick, stats, delay: seen.append(stats),
+            )
+        return seen
+
+    def test_the_loop_continues_past_a_locked_database(self):
+        seen = self._run(failures=1, max_ticks=3)
+        self.assertEqual(len(seen), 3)
+        self.assertIn("locked", seen[0]["error"])
+        self.assertNotIn("error", seen[1])
+        self.assertEqual(seen[1]["dispatched"], 1)
+
+    def test_a_sustained_run_of_failures_still_stops(self):
+        with self.assertRaises(sqlite3.OperationalError):
+            self._run(
+                failures=daemon.MAX_CONSECUTIVE_TICK_FAILURES + 1,
+                max_ticks=daemon.MAX_CONSECUTIVE_TICK_FAILURES + 5,
+            )
