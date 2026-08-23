@@ -498,3 +498,47 @@ class ProgressFlushTests(unittest.TestCase):
             self.assertEqual(row["progress_tokens"], 345)
             self.assertEqual(row["progress_items"], 1)
             conn.close()
+
+
+class ReclaimYieldsItsPlaceTests(unittest.TestCase):
+    """A job that keeps outrunning its lease must not keep the queue head."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+
+    def test_expiry_counts_as_an_attempt(self):
+        self.conn.execute(
+            "INSERT INTO jobs (id, kind, target_type, target_id, status, "
+            "lease_id, lease_expires_at) "
+            "VALUES (1, 'student_work', 'task', ?, 'running', 'x', "
+            "datetime('now', '-1 minute'))",
+            (self.ids["task_id"],),
+        )
+        self.conn.commit()
+        self.assertEqual(jobs.reclaim_expired_leases(self.conn), 1)
+        row = self.conn.execute("SELECT status, attempts FROM jobs WHERE id=1").fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["attempts"], 1)
+
+    def test_a_reclaimed_job_sorts_behind_untried_work(self):
+        self.conn.execute(
+            "INSERT INTO jobs (id, kind, target_type, target_id, status, "
+            "lease_id, lease_expires_at, created_at) "
+            "VALUES (1, 'student_work', 'task', ?, 'running', 'x', "
+            "datetime('now', '-1 minute'), '2026-01-01 00:00:00')",
+            (self.ids["task_id"],),
+        )
+        self.conn.execute(
+            "INSERT INTO jobs (id, kind, target_type, target_id, status, created_at) "
+            "VALUES (2, 'student_work', 'task', ?, 'pending', '2026-01-02 00:00:00')",
+            (self.ids["task_id"],),
+        )
+        self.conn.commit()
+        jobs.reclaim_expired_leases(self.conn)
+        order = [
+            r["id"] for r in self.conn.execute(
+                "SELECT id FROM jobs WHERE status='pending' ORDER BY attempts, created_at"
+            )
+        ]
+        self.assertEqual(order, [2, 1])

@@ -379,8 +379,14 @@ def reclaim_expired_leases(conn: sqlite3.Connection) -> int:
     §5.2 -- this only handles the "lease expired" half; the write-time
     lease-id check in complete_job/fail_job/record_rate_limit is what
     prevents the reclaimed-but-still-alive process from double-applying."""
+    # Count the expiry as an attempt. Dispatch orders by attempts before age,
+    # so without this a job that keeps outrunning its lease keeps its place at
+    # the head of the queue and re-takes its lab's workspace lock on every
+    # tick -- observed live as lab 8's oldest job blocking two sibling tasks
+    # for over three hours while never finishing a round itself.
     cur = conn.execute(
-        "UPDATE jobs SET status='pending', lease_id=NULL, lease_expires_at=NULL "
+        "UPDATE jobs SET status='pending', lease_id=NULL, lease_expires_at=NULL, "
+        "attempts = attempts + 1 "
         "WHERE status='running' AND lease_expires_at < datetime('now')"
     )
     conn.commit()
