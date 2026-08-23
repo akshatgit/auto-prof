@@ -981,3 +981,36 @@ class TransientTickFailureTests(unittest.TestCase):
                 failures=daemon.MAX_CONSECUTIVE_TICK_FAILURES + 1,
                 max_ticks=daemon.MAX_CONSECUTIVE_TICK_FAILURES + 5,
             )
+
+
+class TickFailureBackoffTests(unittest.TestCase):
+    """Retrying inside the same lock spends the allowance for nothing."""
+
+    def test_each_successive_failure_waits_longer(self):
+        slept, calls = [], {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                raise sqlite3.OperationalError("database is locked")
+            return {"reclaimed": 0, "dispatched": 0}
+
+        with mock.patch.object(daemon, "run_tick", flaky), \
+             mock.patch.object(daemon, "next_wake_delay", lambda *a, **k: 0):
+            daemon.run_daemon(
+                mock.MagicMock(), None, {}, Path("."), max_ticks=4,
+                sleep_fn=slept.append,
+            )
+        backoffs = [s for s in slept if s]
+        self.assertEqual(
+            backoffs,
+            [daemon.TICK_FAILURE_BACKOFF_SECONDS * n for n in (1, 2, 3)],
+        )
+
+    def test_backoff_is_capped(self):
+        self.assertLessEqual(
+            daemon.TICK_FAILURE_BACKOFF_SECONDS
+            * daemon.MAX_CONSECUTIVE_TICK_FAILURES,
+            daemon.MAX_TICK_FAILURE_BACKOFF_SECONDS
+            * daemon.MAX_CONSECUTIVE_TICK_FAILURES,
+        )

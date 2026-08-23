@@ -446,6 +446,8 @@ def run_tick(
 
 
 MAX_CONSECUTIVE_TICK_FAILURES = 10
+TICK_FAILURE_BACKOFF_SECONDS = 15.0
+MAX_TICK_FAILURE_BACKOFF_SECONDS = 120.0
 
 
 def run_daemon(
@@ -490,6 +492,12 @@ def run_daemon(
             stats = {"reclaimed": 0, "dispatched": 0, "error": str(exc)}
             if consecutive_failures >= MAX_CONSECUTIVE_TICK_FAILURES:
                 raise
+            # Retrying immediately just spends the whole allowance inside the
+            # same lock: ten ticks at the poll interval burned through it in
+            # under two minutes while the writer holding the database had not
+            # even finished. Back off so the allowance covers a real outage.
+            sleep_fn(min(TICK_FAILURE_BACKOFF_SECONDS * consecutive_failures,
+                         MAX_TICK_FAILURE_BACKOFF_SECONDS))
         else:
             consecutive_failures = 0
         ticks += 1
