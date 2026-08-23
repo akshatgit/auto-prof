@@ -558,3 +558,26 @@ class NoJobRunsInTheDaemonsDirectoryTests(unittest.TestCase):
         start = src.index("def execute_student_write_paper_job(")
         end = src.find("\ndef ", start + 10)
         self.assertNotIn("writable=True", src[start:end])
+
+
+class OperatorNotesReachEveryWriterTests(unittest.TestCase):
+    """A rejected paper is fixed in revision, not in the research round."""
+
+    def test_revise_template_carries_the_slot(self):
+        self.assertIn("{operator_notes}", paper.REVISE_PROMPT_TEMPLATE)
+
+    def test_author_response_template_carries_the_slot(self):
+        from autoprof import author_response
+        self.assertIn("{operator_notes}", author_response.RESPONSE_PROMPT_TEMPLATE)
+
+    def test_every_student_facing_template_carries_the_slot(self):
+        from autoprof import author_response, supervision
+        for name, template in (
+            ("work", paper.WORK_PROMPT_TEMPLATE),
+            ("write_paper", paper.PAPER_PROMPT_TEMPLATE),
+            ("revise", paper.REVISE_PROMPT_TEMPLATE),
+            ("supervision", supervision.SUPERVISION_PROMPT_TEMPLATE),
+            ("author_response", author_response.RESPONSE_PROMPT_TEMPLATE),
+        ):
+            with self.subTest(template=name):
+                self.assertIn("{operator_notes}", template)

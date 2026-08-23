@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from . import config, jobs, tools
+from . import config, jobs, supervision, tools
 from .artifacts import write_artifact
 from .backends.base import Backend
 from .events import record_job_event
@@ -44,6 +44,8 @@ here. You are answering a question, not revising.
 
 --- THE REVIEWER'S REQUEST ---
 {request}
+
+{operator_notes}
 
 --- YOUR PAPER, AS SUBMITTED ---
 {paper}
@@ -88,6 +90,9 @@ def execute_author_response_job(
         tool_docs=tools.render_tool_docs(),
         request=request_file.read_text(errors="replace") if request_file.exists() else "(missing)",
         paper=paper_file.read_text(errors="replace"),
+        operator_notes=supervision.render_operator_notes(
+            lab_dir, task["lab_id"], task["id"]
+        ),
     )
     # Writable: a reviewer may legitimately ask the author to run something.
     opts = tools.evidence_cwd_options(backend.name, task["lab_id"], writable=True)

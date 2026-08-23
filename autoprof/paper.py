@@ -182,6 +182,8 @@ Your working memory from the research:
 {memory}
 </memory>
 
+{operator_notes}
+
 This is the paper as submitted:
 <paper>
 {paper}
@@ -659,6 +661,7 @@ def execute_student_revise_paper_job(
         reference_bank=references.render_for_prompt(conn),
         paper=paper_file.read_text(),
         reviews="\n\n".join(reviews),
+        operator_notes=supervision.render_operator_notes(lab_dir, lab["id"], task["id"]),
     )
 
     # A revision that cannot reach the workspace can only rewrite prose.
