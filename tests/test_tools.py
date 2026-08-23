@@ -1067,3 +1067,20 @@ class FenceInsideToolBodyTests(unittest.TestCase):
 
     def test_an_unterminated_block_is_not_executed(self):
         self.assertEqual(tools.parse_tool_calls("```tool:shell\nrm -rf /\n"), [])
+
+
+class InlineFenceOpenerTests(unittest.TestCase):
+    """Models run the opener straight on from prose, with no newline."""
+
+    def test_opener_immediately_after_prose_is_recognised(self):
+        text = "Let me locate the tree.```tool:shell\ncd /x && ls\n```"
+        self.assertEqual(tools.parse_tool_calls(text), [("shell", "cd /x && ls\n")])
+
+    def test_inline_opener_does_not_trip_the_unparsed_guard(self):
+        text = "First locate the template.```tool:shell\ncd /x && pwd\n```"
+        self.assertFalse(tools.has_unparsed_tool_syntax(text))
+
+    def test_inline_opener_still_ends_at_the_last_fence(self):
+        text = "Do it.```tool:shell\ncat <<'EOF'\n```\nx\n```\nEOF\ndone\n```"
+        (_, body), = tools.parse_tool_calls(text)
+        self.assertIn("EOF\ndone", body)

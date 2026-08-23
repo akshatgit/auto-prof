@@ -70,8 +70,12 @@ _NAMES = "|".join(TOOL_NAMES)
 # _fenced_tool_calls, not by this pattern: a non-greedy ``` would stop at the
 # first fence inside the body, and a shell script that writes markdown has
 # fences inside the body all the time.
+# Deliberately NOT anchored to a line start: models routinely run the opener
+# straight on from prose -- "...locate the template.```tool:shell" -- and
+# requiring a newline in front of it silently stopped recognising those,
+# which failed the whole round. ```tool: is unambiguous enough to stand alone.
 _TOOL_OPEN_RE = re.compile(
-    rf"(?:\A|\n)(?P<indent>[ \t]*)```tool:(?P<name>{_NAMES})[ \t]*\n",
+    rf"```tool:(?P<name>{_NAMES})[ \t]*\n",
     re.IGNORECASE,
 )
 # A line that is nothing but a closing fence.
