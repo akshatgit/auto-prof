@@ -68,6 +68,8 @@ Your student's current working memory -- everything they have established so far
 
 {prior_reviews}
 
+{operator_notes}
+
 Read their work critically, as the person responsible for it. You are NOT a peer reviewer \
 writing a verdict on a finished paper; you are the supervisor deciding what happens next. \
 Independent reviewers will later check every step and reject the paper if any step fails, so \
@@ -138,9 +140,12 @@ def render_operator_notes(lab_dir, lab_id: int, task_id: int) -> str:
     return (
         "<operator_notes>\n"
         "Standing instructions from the human operator who commissioned this lab. "
-        "These outrank your own plan and your memory. They are not part of your "
-        "memory and you cannot edit them; if one conflicts with a note you wrote "
-        "yourself, the operator's instruction governs.\n\n"
+        "These outrank your own plan, your memory, AND your supervisor's "
+        "guidance. They are not part of your memory and you cannot edit them. "
+        "If one conflicts with a note you wrote yourself or with what the last "
+        "supervision meeting told you to do, the operator's instruction "
+        "governs -- do the operator's item and say in your memory which "
+        "supervision guidance you set aside and why.\n\n"
         + text + "\n</operator_notes>"
     )
 
@@ -352,6 +357,7 @@ def execute_professor_supervision_job(
             memory=memory,
             ledger=assumptions.render(conn, task['id'], for_professor=True),
             prior_reviews=render_prior_reviews(conn, task["id"], lab_dir),
+            operator_notes=render_operator_notes(lab_dir, lab["id"], task["id"]),
         ),
     )
 

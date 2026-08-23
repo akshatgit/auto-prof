@@ -523,3 +523,19 @@ class OperatorNotesTests(unittest.TestCase):
         from autoprof import paper
         self.assertIn("{operator_notes}", paper.WORK_PROMPT_TEMPLATE)
         self.assertIn("{operator_notes}", paper.PAPER_PROMPT_TEMPLATE)
+
+
+class OperatorNotesReachTheProfessorTests(unittest.TestCase):
+    """The professor writes the guidance the student follows next round."""
+
+    def test_the_supervision_template_carries_the_slot(self):
+        self.assertIn("{operator_notes}", supervision.SUPERVISION_PROMPT_TEMPLATE)
+
+    def test_precedence_covers_supervision_guidance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "9" / "tasks" / "35" / "OPERATOR_NOTES.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("Run the five items.")
+            out = supervision.render_operator_notes(Path(tmp), 9, 35)
+            self.assertIn("supervision", out)
+            self.assertIn("outrank", out)
