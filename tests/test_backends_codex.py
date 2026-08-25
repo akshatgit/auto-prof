@@ -568,3 +568,34 @@ class ResumeKeepsSandboxAndCwdTests(unittest.TestCase):
         calls, runner = self._capture()
         CodexBackend(runner=runner).run("p", sandbox="workspace-write", cwd="/ws")
         self.assertEqual(calls[0][1].get("cwd"), "/ws")
+
+
+class ExhaustedThreadRestartsTests(unittest.TestCase):
+    """A full context window is not a rate limit; it needs a new thread."""
+
+    def test_resuming_into_a_full_thread_starts_a_fresh_one(self):
+        resumed = []
+        exhausted = (
+            "Codex ran out of room in the model's context window. "
+            "Start a new thread or clear earlier history before retrying."
+        )
+
+        def runner(cmd, **kwargs):
+            joined = " ".join(cmd)
+            resumed.append("resume" in joined)
+            if len(resumed) == 1:
+                return SimpleNamespace(returncode=1, stdout=exhausted, stderr="")
+            out_path = cmd[cmd.index("-o") + 1]
+            with open(out_path, "w") as f:
+                f.write("recovered")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        backend = CodexBackend(runner=runner)
+        result = backend.run("prompt", resume_session_id="stale-thread")
+
+        self.assertFalse(
+            result.rate_limited, "exhaustion must not be reported as a rate limit"
+        )
+        self.assertEqual(len(resumed), 2, "should retry once with a fresh thread")
+        self.assertTrue(resumed[0], "first attempt resumes the stale thread")
+        self.assertFalse(resumed[1], "the retry must NOT resume the full thread")

@@ -417,9 +417,20 @@ class CodexBackend(Backend):
                 # every job after it. The prompt already carries the
                 # agent's memory, so the cost is lost conversational
                 # context, not lost research.
+                # A FULL thread is as unusable as a missing one, and the
+                # remedy is the same. Treating exhaustion as merely
+                # "rate limited, session still resumable" made every retry
+                # resume the same full thread and fail identically: five
+                # jobs sat in that loop for a day, each retry re-reported
+                # as a rate limit until the provider was circuit-broken and
+                # a live account looked like an expired one. Codex says what
+                # to do -- "Start a new thread" -- so do that.
                 if (
                     resuming
-                    and _looks_like_missing_session(combined_output)
+                    and (
+                        _looks_like_missing_session(combined_output)
+                        or _looks_token_exhausted(combined_output)
+                    )
                     and not opts.get("_session_restarted")
                 ):
                     fresh = dict(opts)
