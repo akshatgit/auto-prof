@@ -542,3 +542,41 @@ class ReclaimYieldsItsPlaceTests(unittest.TestCase):
             )
         ]
         self.assertEqual(order, [2, 1])
+
+
+class SessionBelongsToItsBackendTests(unittest.TestCase):
+    """Reconfiguring a panel must not hand one backend's thread to another."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.conn.execute(
+            "INSERT INTO jobs (id, kind, target_type, target_id, status, "
+            "backend, backend_session_id) "
+            "VALUES (1, 'paper_review', 'task', ?, 'running', 'codex', 'codex-thread-1')",
+            (self.ids["task_id"],),
+        )
+        self.conn.commit()
+
+    def _run_with(self, backend_name):
+        seen = {}
+
+        class Backend:
+            name = backend_name
+
+            def run(self, prompt, **opts):
+                seen["resume"] = opts.get("resume_session_id")
+                return SimpleNamespace(session_id=None, text="ok")
+
+        jobs.run_with_session(self.conn, 1, Backend(), "prompt")
+        return seen
+
+    def test_a_different_backend_does_not_inherit_the_session(self):
+        self.assertIsNone(self._run_with("claude")["resume"])
+        row = self.conn.execute(
+            "SELECT backend_session_id FROM jobs WHERE id=1"
+        ).fetchone()
+        self.assertIsNone(row["backend_session_id"], "stale id should be cleared")
+
+    def test_the_same_backend_still_resumes(self):
+        self.assertEqual(self._run_with("codex")["resume"], "codex-thread-1")

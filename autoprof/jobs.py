@@ -348,8 +348,23 @@ def run_with_session(conn: sqlite3.Connection, job_id: int, backend, prompt: str
     daemon that dies between the backend call and the job's own state
     write still leaves the session recoverable.
     """
-    row = conn.execute("SELECT backend_session_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    row = conn.execute(
+        "SELECT backend_session_id, backend FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
     previous = row["backend_session_id"] if row is not None else None
+    # A session belongs to the backend that opened it. When a lab's review
+    # panel or generation backend is reconfigured, a job can be retried on a
+    # DIFFERENT backend while still holding the old one's session id -- and
+    # handing a Codex thread id to Claude fails with "No conversation found",
+    # burning attempts on a job that is otherwise fine. Resume only within
+    # the backend that created the session.
+    owner = row["backend"] if row is not None else None
+    if previous and owner and owner != getattr(backend, "name", owner):
+        previous = None
+        conn.execute(
+            "UPDATE jobs SET backend_session_id = NULL WHERE id = ?", (job_id,)
+        )
+        conn.commit()
     if previous:
         opts.setdefault("resume_session_id", previous)
 
