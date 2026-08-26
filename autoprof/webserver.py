@@ -352,6 +352,8 @@ def render_lab_detail(conn: sqlite3.Connection, lab_id: int) -> str | None:
         f"&mdash; professor: <a href='/professors/{professor['id']}'>{_e(professor['name'])}</a> "
         f"({_e(professor['field'])})</p>"
         f"<h2>Root problem</h2><div class='doc'>{markdown.render(lab['root_problem'])}</div>"
+        f"<p><a href='/labs/{lab['id']}/workspace'><strong>Browse this lab's workspace &rarr;</strong></a>"
+        f" <span class='muted'>the shared tree where the code, tests and preregistration live</span></p>"
         f"<h2>Tasks</h2><table><tr><th>id</th><th>title</th><th>status</th><th>direction</th><th>papers</th></tr>{task_rows}</table>"
         f"<h2>Lab reviews</h2><table><tr><th>round</th><th>reviewer</th>"
         f"<th>verdict</th><th></th></tr>{review_rows}</table>"
@@ -520,19 +522,26 @@ def _confine(root: Path, relpath: str) -> Path | None:
     return target
 
 
-def _breadcrumb(task_id: int, relpath: str) -> str:
+def _breadcrumb(base: str, label: str, relpath: str) -> str:
     parts = [p for p in relpath.split("/") if p]
-    crumbs = [f"<a href='/tasks/{task_id}/files'>task {task_id}</a>"]
+    crumbs = [f"<a href='{base}'>{_e(label)}</a>"]
     for i, part in enumerate(parts):
         sub = "/".join(parts[: i + 1])
-        crumbs.append(f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(part)}</a>")
+        crumbs.append(f"<a href='{base}/{quote(sub)}'>{_e(part)}</a>")
     return " / ".join(crumbs)
 
 
-def _render_directory(task_id: int, target: Path, relpath: str) -> str:
+# Directories that are never the lab's own work: a virtualenv holds
+# thousands of vendored files and .git is the object store. Listing
+# either buries the handful of files somebody actually came to read.
+_BROWSE_SKIP = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache"}
+
+
+def _render_directory(base: str, target: Path, relpath: str) -> str:
     try:
         entries = sorted(
-            target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+            (e for e in target.iterdir() if e.name not in _BROWSE_SKIP),
+            key=lambda p: (not p.is_dir(), p.name.lower()),
         )
     except OSError as e:
         return f"<p class='muted'>cannot list this directory: {_e(e)}</p>"
@@ -551,10 +560,10 @@ def _render_directory(task_id: int, target: Path, relpath: str) -> str:
                 size = f"{count} item{'' if count == 1 else 's'}"
             except OSError:
                 size = "-"
-            name = f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(entry.name)}/</a>"
+            name = f"<a href='{base}/{quote(sub)}'>{_e(entry.name)}/</a>"
         else:
             size = _human_size(st.st_size)
-            name = f"<a href='/tasks/{task_id}/files/{quote(sub)}'>{_e(entry.name)}</a>"
+            name = f"<a href='{base}/{quote(sub)}'>{_e(entry.name)}</a>"
         rows.append(
             f"<tr><td>{name}</td><td class='muted'>{size}</td>"
             f"<td class='muted'>{when}</td></tr>"
@@ -609,13 +618,49 @@ def render_task_files(
     if target is None or not target.exists():
         return None
 
+    base = f"/tasks/{task_id}/files"
     body = (
         f"<p><a href='/tasks/{task_id}'>&larr; task #{task_id}</a></p>"
-        f"<h1>Files</h1><p>{_breadcrumb(task_id, relpath)}</p>"
+        f"<h1>Files</h1><p>{_breadcrumb(base, f'task {task_id}', relpath)}</p>"
     )
-    body += _render_directory(task_id, target, relpath) if target.is_dir() else _render_file(target)
+    body += _render_directory(base, target, relpath) if target.is_dir() else _render_file(target)
     label = relpath or "task folder"
     return _PAGE.format(title=f"autoprof — task {task_id} — {label}", body=body)
+
+
+def render_lab_workspace(
+    conn: sqlite3.Connection, lab_id: int, relpath: str, lab_dir
+) -> str | None:
+    """Browse a lab's shared workspace -- where the code actually lives.
+
+    The task file browser roots at lab/<lab>/tasks/<task>/, but a lab's real
+    output is written to the SHARED workspace, so a student's harness, tests
+    and preregistration were unreachable from the UI. That split has already
+    cost this system rounds -- work landing in one tree while everything
+    downstream reads the other -- and there is no reason it should also cost
+    the operator visibility.
+    """
+    if lab_dir is None:
+        return None
+    row = conn.execute("SELECT id FROM labs WHERE id = ?", (lab_id,)).fetchone()
+    if row is None:
+        return None
+    root = Path(lab_dir).resolve() / str(lab_id) / "workspace"
+    if not root.is_dir():
+        return None
+    relpath = unquote(relpath or "").strip("/")
+    target = _confine(root, relpath)
+    if target is None or not target.exists():
+        return None
+
+    base = f"/labs/{lab_id}/workspace"
+    body = (
+        f"<p><a href='/labs/{lab_id}'>&larr; lab #{lab_id}</a></p>"
+        f"<h1>Workspace</h1><p>{_breadcrumb(base, f'lab {lab_id} workspace', relpath)}</p>"
+    )
+    body += _render_directory(base, target, relpath) if target.is_dir() else _render_file(target)
+    label = relpath or "workspace"
+    return _PAGE.format(title=f"autoprof — lab {lab_id} — {label}", body=body)
 
 
 _MATHJAX_TAG = (
@@ -938,6 +983,8 @@ _ROUTES = [
     (re.compile(r"^/tasks/(\d+)$"), lambda conn, m, d: render_task_detail(conn, int(m.group(1)), d)),
     (re.compile(r"^/tasks/(\d+)/files(?:/(.*))?$"),
      lambda conn, m, d: render_task_files(conn, int(m.group(1)), m.group(2) or "", d)),
+    (re.compile(r"^/labs/(\d+)/workspace(?:/(.*))?$"),
+     lambda conn, m, d: render_lab_workspace(conn, int(m.group(1)), m.group(2) or "", d)),
     (re.compile(r"^/tools/(\d+)$"), lambda conn, m, d: render_tool_run(conn, int(m.group(1)), d)),
     (re.compile(r"^/supervision/(\d+)/(\d+)$"),
      lambda conn, m, d: render_supervision(conn, int(m.group(1)), int(m.group(2)), d)),

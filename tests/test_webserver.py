@@ -642,3 +642,48 @@ class JobsPageUsageTests(unittest.TestCase):
             page = webserver.render_jobs(self.conn)
         self.assertIn("$10.00", page)
         self.assertIn("total estimate", page)
+
+
+class LabWorkspaceBrowserTests(unittest.TestCase):
+    """A lab's code lives in the shared workspace, not the task folder."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+        ws = self.lab_dir / str(self.ids["lab_id"]) / "workspace"
+        (ws / "pkg").mkdir(parents=True)
+        (ws / "pkg" / "protocol.py").write_text("VALUE = 1\n")
+        for noise in (".venv", ".git", "__pycache__"):
+            (ws / noise).mkdir()
+            (ws / noise / "junk").write_text("x")
+
+    def _page(self, rel=""):
+        return webserver.render_lab_workspace(
+            self.conn, self.ids["lab_id"], rel, self.lab_dir
+        )
+
+    def test_workspace_root_lists_the_package(self):
+        page = self._page()
+        self.assertIsNotNone(page)
+        self.assertIn("pkg", page)
+
+    def test_venv_and_git_are_not_listed(self):
+        page = self._page()
+        for noise in (".venv", ".git", "__pycache__"):
+            self.assertNotIn(noise, page, f"{noise} should not be browsable")
+
+    def test_a_source_file_renders(self):
+        page = self._page("pkg/protocol.py")
+        self.assertIsNotNone(page)
+        self.assertIn("VALUE = 1", page)
+
+    def test_path_traversal_is_refused(self):
+        self.assertIsNone(self._page("../../../etc/passwd"))
+
+    def test_unknown_lab_is_none(self):
+        self.assertIsNone(
+            webserver.render_lab_workspace(self.conn, 9999, "", self.lab_dir)
+        )
