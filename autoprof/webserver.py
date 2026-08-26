@@ -577,6 +577,9 @@ def _render_directory(base: str, target: Path, relpath: str) -> str:
     )
 
 
+_MARKDOWN_SUFFIXES = {".md", ".markdown"}
+
+
 def _render_file(target: Path) -> str:
     try:
         size = target.stat().st_size
@@ -604,6 +607,12 @@ def _render_file(target: Path) -> str:
         except OSError as e:
             return f"<p class='muted'>cannot read: {_e(e)}</p>"
         note = f"<p class='muted'>{_human_size(size)}</p>"
+    # Markdown is the format the labs actually write their thinking in --
+    # preregistrations, results ledgers, briefs, repair logs. Serving those as
+    # escaped <pre> made tables and headings unreadable exactly where reading
+    # matters most. Source stays available for anything that is not markdown.
+    if suffix in _MARKDOWN_SUFFIXES:
+        return note + f"<div class='doc'>{markdown.render(text)}</div>"
     return note + f"<pre class='doc'>{_e(text)}</pre>"
 
 

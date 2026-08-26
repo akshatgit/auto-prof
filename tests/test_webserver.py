@@ -687,3 +687,43 @@ class LabWorkspaceBrowserTests(unittest.TestCase):
         self.assertIsNone(
             webserver.render_lab_workspace(self.conn, 9999, "", self.lab_dir)
         )
+
+
+class MarkdownInFileBrowserTests(unittest.TestCase):
+    """Labs write their preregistrations and ledgers in markdown."""
+
+    def setUp(self):
+        self.conn = fresh_db()
+        self.ids = seed_lab_with_student(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lab_dir = Path(self.tmp.name)
+        self.ws = self.lab_dir / str(self.ids["lab_id"]) / "workspace"
+        self.ws.mkdir(parents=True)
+
+    def _page(self, name, text):
+        (self.ws / name).write_text(text)
+        return webserver.render_lab_workspace(
+            self.conn, self.ids["lab_id"], name, self.lab_dir
+        )
+
+    def _body(self, page):
+        return page.split("<h1>Workspace</h1>", 1)[1]
+
+    def test_markdown_headings_are_rendered(self):
+        body = self._body(
+            self._page("PREREGISTRATION.md", "# Frozen corpus\n\nsome prose\n")
+        )
+        self.assertIn("Frozen corpus</h", body, "heading should be a real element")
+        self.assertNotIn("# Frozen corpus", body, "raw markdown should not survive")
+        self.assertNotIn("<pre", body, "markdown must not be dumped as source")
+
+    def test_python_is_still_shown_as_source(self):
+        body = self._body(self._page("protocol.py", "# not a heading\nVALUE = 1\n"))
+        self.assertIn("<pre", body)
+        self.assertIn("VALUE = 1", body)
+        self.assertIn("# not a heading", body, "a python comment is not a heading")
+
+    def test_markdown_escapes_embedded_html(self):
+        page = self._page("notes.md", "# Title\n\n<script>alert(1)</script>\n")
+        self.assertNotIn("<script>alert(1)</script>", page)
