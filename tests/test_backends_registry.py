@@ -273,3 +273,32 @@ class OllamaModelSelectionTests(unittest.TestCase):
             "ollama_cloud", {"backends": {"ollama_timeout": "not-a-number"}}, {}
         )
         self.assertNotIn("timeout", opts)
+
+
+class LabScopedCodexModelTests(unittest.TestCase):
+    """One lab may need a model whose family refuses another lab's prompts."""
+
+    def test_lab_scoped_model_wins_over_global(self):
+        env = {"AUTOPROF_CODEX_MODEL": "gpt-5.5",
+               "AUTOPROF_CODEX_MODEL_10": "gpt-5.6-luna"}
+        self.assertEqual(
+            registry.backend_options("codex", {}, env, lab_id=10)["model"],
+            "gpt-5.6-luna",
+        )
+
+    def test_other_labs_keep_the_global_model(self):
+        env = {"AUTOPROF_CODEX_MODEL": "gpt-5.5",
+               "AUTOPROF_CODEX_MODEL_10": "gpt-5.6-luna"}
+        self.assertEqual(
+            registry.backend_options("codex", {}, env, lab_id=9)["model"], "gpt-5.5"
+        )
+
+    def test_two_labs_do_not_share_one_instance(self):
+        env = {"AUTOPROF_CODEX_MODEL_10": "gpt-5.6-luna",
+               "AUTOPROF_CODEX_MODEL_9": "gpt-5.5",
+               "AUTOPROF_GENERATION_BACKEND_9": "codex",
+               "AUTOPROF_GENERATION_BACKEND_10": "codex"}
+        reg = registry.Registry(config={}, env=env)
+        nine = reg.get_backend("student_work", None, lab_id=9)
+        ten = reg.get_backend("student_work", None, lab_id=10)
+        self.assertIsNot(nine, ten, "labs with different models must not share an instance")

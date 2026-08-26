@@ -154,7 +154,7 @@ def resolve_backend_name(
     return DEFAULT_BACKEND_FOR_CATEGORY[category]
 
 
-def backend_options(name: str, config: dict, env: dict) -> dict:
+def backend_options(name: str, config: dict, env: dict, lab_id: int | None = None) -> dict:
     """Constructor kwargs for one backend.
 
     The Ollama model was a hardcoded class default with no way to
@@ -172,7 +172,16 @@ def backend_options(name: str, config: dict, env: dict) -> dict:
     # measured, 4 of 4. Without this, the only way to pick the model that
     # works was to change the user's global CLI config for every project.
     if name == "codex":
-        model = env.get("AUTOPROF_CODEX_MODEL") or backends.get("codex_model")
+        # Lab-scoped first: one lab may need a model another lab's prompts are
+        # refused by. gpt-5.6-sol refuses lab 9's build-cache prompts as a
+        # cybersecurity risk while gpt-5.5 answers them, so a single global
+        # model cannot serve both labs at once.
+        scoped = f"AUTOPROF_CODEX_MODEL_{lab_id}" if lab_id is not None else None
+        model = (
+            (env.get(scoped) if scoped else None)
+            or env.get("AUTOPROF_CODEX_MODEL")
+            or backends.get("codex_model")
+        )
         return {"model": str(model)} if model else {}
     if name not in {"ollama_cloud", "ollama_cloud_review"}:
         return {}
@@ -227,15 +236,20 @@ class Registry:
         name = resolve_backend_name(
             kind, self.config, self.env, reviewer_index, lab_id=lab_id
         )
-        if name not in self._instances:
+        options = backend_options(name, self.config, self.env, lab_id=lab_id)
+        # Key the cache on the RESOLVED options, not just the backend name.
+        # Keying on the name alone meant two labs configured with different
+        # models silently shared whichever instance was built first.
+        key = (name, tuple(sorted(options.items())))
+        if key not in self._instances:
             cls = self.backend_classes.get(name)
             if cls is None:
                 raise ValueError(
                     f"unknown backend {name!r} configured for job kind {kind!r} "
                     f"(known backends: {sorted(self.backend_classes)})"
                 )
-            self._instances[name] = cls(**backend_options(name, self.config, self.env))
-        return self._instances[name]
+            self._instances[key] = cls(**options)
+        return self._instances[key]
 
 
 def default_registry(config_path: Path | None = None) -> Registry:
